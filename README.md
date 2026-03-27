@@ -9,9 +9,18 @@
 ```bash
 # Build
 cd collab-cli && cargo build --release
+```
 
-# Copy to path
+**Linux/Mac:**
+```bash
+mkdir -p ~/bin
 cp target/release/collab ~/bin/
+```
+
+**Windows:**
+```powershell
+mkdir -Force "$env:USERPROFILE\bin"
+copy target\release\collab.exe "$env:USERPROFILE\bin\"
 ```
 
 Add to `~/.zshrc` or `~/.bashrc` (Linux/Mac):
