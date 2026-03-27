@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -38,8 +38,14 @@ pub struct Message {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerInfo {
     pub instance_id: String,
+    pub role: String,
     pub last_seen: DateTime<Utc>,
     pub message_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PresenceUpdate {
+    pub role: Option<String>,
 }
 
 #[derive(Clone)]
@@ -54,6 +60,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/messages/:instance_id", get(list_messages))
         .route("/history/:instance_id", get(get_history))
         .route("/roster", get(get_roster))
+        .route("/presence/:instance_id", put(update_presence))
         .route("/messages/cleanup", delete(cleanup_old_messages))
         .layer(CorsLayer::permissive())
         .with_state(Arc::new(state))
@@ -77,7 +84,6 @@ async fn list_messages(
     Path(instance_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Message>>, StatusCode> {
-    // Calculate cutoff time (1 hour ago)
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
@@ -98,33 +104,7 @@ async fn list_messages(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let messages: Vec<Message> = rows
-        .into_iter()
-        .filter_map(|row| {
-            let refs_str: String = row.get("refs");
-            let refs = if refs_str.is_empty() {
-                vec![]
-            } else {
-                refs_str.split(',').map(|s| s.to_string()).collect()
-            };
-
-            let timestamp_str: String = row.get("timestamp");
-            let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
-                .ok()?
-                .with_timezone(&Utc);
-
-            Some(Message {
-                id: row.get("id"),
-                hash: row.get("hash"),
-                sender: row.get("sender"),
-                recipient: row.get("recipient"),
-                content: row.get("content"),
-                refs,
-                timestamp,
-            })
-        })
-        .collect();
-
+    let messages = parse_message_rows(rows);
     Ok(Json(messages))
 }
 
@@ -132,7 +112,6 @@ async fn get_history(
     Path(instance_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Message>>, StatusCode> {
-    // Get all messages (sent or received) for this instance from the last hour
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
@@ -154,44 +133,81 @@ async fn get_history(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let messages: Vec<Message> = rows
-        .into_iter()
-        .filter_map(|row| {
-            let refs_str: String = row.get("refs");
-            let refs = if refs_str.is_empty() {
-                vec![]
-            } else {
-                refs_str.split(',').map(|s| s.to_string()).collect()
-            };
-
-            let timestamp_str: String = row.get("timestamp");
-            let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
-                .ok()?
-                .with_timezone(&Utc);
-
-            Some(Message {
-                id: row.get("id"),
-                hash: row.get("hash"),
-                sender: row.get("sender"),
-                recipient: row.get("recipient"),
-                content: row.get("content"),
-                refs,
-                timestamp,
-            })
-        })
-        .collect();
-
+    let messages = parse_message_rows(rows);
     Ok(Json(messages))
 }
 
 async fn get_roster(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<WorkerInfo>>, StatusCode> {
-    // Get all unique workers who have sent messages in the last hour
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
-    let rows = sqlx::query(
+    // Get workers from presence table (announced themselves via watch)
+    let presence_rows = sqlx::query(
+        r#"
+        SELECT instance_id, role, last_seen
+        FROM presence
+        WHERE last_seen >= ?
+        ORDER BY last_seen DESC
+        "#,
+    )
+    .bind(&cutoff_iso)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database error: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Get message counts for workers who have sent messages
+    let message_rows = sqlx::query(
+        r#"
+        SELECT sender, COUNT(*) as message_count
+        FROM messages
+        WHERE timestamp >= ?
+        GROUP BY sender
+        "#,
+    )
+    .bind(&cutoff_iso)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database error: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for row in message_rows {
+        let sender: String = row.get("sender");
+        let count: i64 = row.get("message_count");
+        counts.insert(sender, count as usize);
+    }
+
+    let mut workers: Vec<WorkerInfo> = presence_rows
+        .into_iter()
+        .filter_map(|row| {
+            let timestamp_str: String = row.get("last_seen");
+            let last_seen = DateTime::parse_from_rfc3339(&timestamp_str)
+                .ok()?
+                .with_timezone(&Utc);
+            let instance_id: String = row.get("instance_id");
+            let message_count = counts.get(&instance_id).copied().unwrap_or(0);
+            Some(WorkerInfo {
+                instance_id,
+                role: row.get("role"),
+                last_seen,
+                message_count,
+            })
+        })
+        .collect();
+
+    // Also include any senders not in presence (sent messages but didn't watch)
+    let present_ids: std::collections::HashSet<String> =
+        workers.iter().map(|w| w.instance_id.clone()).collect();
+
+    let sender_rows = sqlx::query(
         r#"
         SELECT sender as instance_id, MAX(timestamp) as last_seen, COUNT(*) as message_count
         FROM messages
@@ -208,42 +224,74 @@ async fn get_roster(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let workers: Vec<WorkerInfo> = rows
-        .into_iter()
-        .filter_map(|row| {
-            let timestamp_str: String = row.get("last_seen");
-            let last_seen = DateTime::parse_from_rfc3339(&timestamp_str)
-                .ok()?
-                .with_timezone(&Utc);
-
-            Some(WorkerInfo {
-                instance_id: row.get("instance_id"),
-                last_seen,
+    for row in sender_rows {
+        let instance_id: String = row.get("instance_id");
+        if present_ids.contains(&instance_id) {
+            continue;
+        }
+        let timestamp_str: String = row.get("last_seen");
+        if let Ok(last_seen) = DateTime::parse_from_rfc3339(&timestamp_str) {
+            workers.push(WorkerInfo {
+                instance_id,
+                role: String::new(),
+                last_seen: last_seen.with_timezone(&Utc),
                 message_count: row.get::<i64, _>("message_count") as usize,
-            })
-        })
-        .collect();
+            });
+        }
+    }
 
     Ok(Json(workers))
+}
+
+async fn update_presence(
+    Path(instance_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<PresenceUpdate>,
+) -> Result<StatusCode, StatusCode> {
+    let now = Utc::now().to_rfc3339();
+    let role = payload.role.unwrap_or_default();
+
+    sqlx::query(
+        r#"
+        INSERT INTO presence (instance_id, role, last_seen)
+        VALUES (?, ?, ?)
+        ON CONFLICT(instance_id) DO UPDATE SET
+            role = CASE WHEN excluded.role != '' THEN excluded.role ELSE role END,
+            last_seen = excluded.last_seen
+        "#,
+    )
+    .bind(&instance_id)
+    .bind(&role)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database error: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_message(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<MessageCreate>,
 ) -> Result<Json<Message>, StatusCode> {
-    // Generate SHA1 hash of content
+    let timestamp = Utc::now();
+
+    // Hash includes sender+recipient+content+timestamp to avoid collisions
     let mut hasher = Sha1::new();
+    hasher.update(payload.sender.as_bytes());
+    hasher.update(b"|");
+    hasher.update(payload.recipient.as_bytes());
+    hasher.update(b"|");
     hasher.update(payload.content.as_bytes());
+    hasher.update(b"|");
+    hasher.update(timestamp.to_rfc3339().as_bytes());
     let content_hash = format!("{:x}", hasher.finalize());
 
-    // Generate unique ID
     let message_id = Uuid::new_v4().to_string();
-
-    // Current timestamp
-    let timestamp = Utc::now();
     let timestamp_iso = timestamp.to_rfc3339();
-
-    // Store refs as comma-separated string
     let refs_str = payload.refs.join(",");
 
     sqlx::query(
@@ -283,20 +331,54 @@ async fn cleanup_old_messages(
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
-    let result = sqlx::query(
-        r#"
-        DELETE FROM messages WHERE timestamp < ?
-        "#,
-    )
-    .bind(&cutoff_iso)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let result = sqlx::query("DELETE FROM messages WHERE timestamp < ?")
+        .bind(&cutoff_iso)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Also clean up stale presence entries
+    sqlx::query("DELETE FROM presence WHERE last_seen < ?")
+        .bind(&cutoff_iso)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(serde_json::json!({
         "deleted": result.rows_affected()
     })))
+}
+
+fn parse_message_rows(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Message> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let refs_str: String = row.get("refs");
+            let refs = if refs_str.is_empty() {
+                vec![]
+            } else {
+                refs_str.split(',').map(|s| s.to_string()).collect()
+            };
+
+            let timestamp_str: String = row.get("timestamp");
+            let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
+                .ok()?
+                .with_timezone(&Utc);
+
+            Some(Message {
+                id: row.get("id"),
+                hash: row.get("hash"),
+                sender: row.get("sender"),
+                recipient: row.get("recipient"),
+                content: row.get("content"),
+                refs,
+                timestamp,
+            })
+        })
+        .collect()
 }

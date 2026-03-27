@@ -11,7 +11,6 @@ pub async fn init_db() -> Result<SqlitePool> {
         .connect_with(options)
         .await?;
 
-    // Create tables
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS messages (
@@ -28,11 +27,22 @@ pub async fn init_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
-    // Create index for efficient recipient lookups
     sqlx::query(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_recipient_timestamp 
+        CREATE INDEX IF NOT EXISTS idx_recipient_timestamp
         ON messages(recipient, timestamp DESC)
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS presence (
+            instance_id TEXT PRIMARY KEY,
+            role TEXT NOT NULL DEFAULT '',
+            last_seen TEXT NOT NULL
+        )
         "#,
     )
     .execute(&pool)
@@ -50,7 +60,6 @@ pub async fn init_test_db() -> Result<SqlitePool> {
         .connect_with(options)
         .await?;
 
-    // Create tables
     sqlx::query(
         r#"
         CREATE TABLE messages (
@@ -67,11 +76,22 @@ pub async fn init_test_db() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
-    // Create index
     sqlx::query(
         r#"
-        CREATE INDEX idx_recipient_timestamp 
+        CREATE INDEX idx_recipient_timestamp
         ON messages(recipient, timestamp DESC)
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS presence (
+            instance_id TEXT PRIMARY KEY,
+            role TEXT NOT NULL DEFAULT '',
+            last_seen TEXT NOT NULL
+        )
         "#,
     )
     .execute(&pool)
@@ -88,20 +108,18 @@ mod tests {
     #[tokio::test]
     async fn test_init_test_db() {
         let pool = init_test_db().await.unwrap();
-        
-        // Verify table exists
+
         let result = sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
             .fetch_one(&pool)
             .await;
-        
+
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_insert_and_query_message() {
         let pool = init_test_db().await.unwrap();
-        
-        // Insert a test message
+
         sqlx::query(
             "INSERT INTO messages (id, hash, sender, recipient, content, refs, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
@@ -115,15 +133,25 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        
-        // Query it back
+
         let row = sqlx::query("SELECT * FROM messages WHERE id = ?")
             .bind("test-id")
             .fetch_one(&pool)
             .await
             .unwrap();
-        
+
         let sender: String = row.get("sender");
         assert_eq!(sender, "worker1");
+    }
+
+    #[tokio::test]
+    async fn test_presence_table_exists() {
+        let pool = init_test_db().await.unwrap();
+
+        let result = sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='presence'")
+            .fetch_one(&pool)
+            .await;
+
+        assert!(result.is_ok());
     }
 }
