@@ -95,6 +95,8 @@ At the start of every session:
 4. When your focus changes, restart watch with an updated --role reflecting the new task
 5. Before starting any new task, run `collab list` to check for pending messages
 6. If there are messages, respond before proceeding: `collab add @sender "response" --refs <hash>`
+7. If you make a change that affects shared interfaces, APIs, or files another worker depends on,
+   notify them immediately: `collab add @other-worker "changed X in file Y — you may need to update Z"`
 ```
 
 Each worker's `~/.collab.toml` should already have their `instance` name and `recipients` configured — Claude Code will pick that up automatically.
