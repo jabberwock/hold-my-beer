@@ -66,15 +66,24 @@ Listens on port 8000. Creates `collab.db` in the current directory.
 
 Each worker needs `~/.collab.toml` (or `C:\Users\<you>\.collab.toml`) with their own `instance` name and the `recipients` they work with.
 
-**Linux/Mac:**
+**Linux/Mac — install and run:**
 ```bash
+sudo cp collab-cli/target/release/collab /usr/local/bin/
 collab watch --role "working on auth module"
 ```
 
-**Windows (PowerShell):**
+**Windows — install and run:**
 ```powershell
-.\collab-cli\target\release\collab.exe watch --role "working on auth module"
+# Copy to a bin folder and add to PATH (one-time setup)
+New-Item -ItemType Directory -Force "$env:USERPROFILE\bin"
+Copy-Item collab-cli\target\release\collab.exe "$env:USERPROFILE\bin\"
+$env:PATH = "$env:USERPROFILE\bin;$env:PATH"
+
+# Then just:
+collab watch --role "working on auth module"
 ```
+
+To make the PATH change permanent, add it to your PowerShell profile (`notepad $PROFILE`).
 
 The `--role` description shows up in `collab roster` so other workers know what you're doing.
 
