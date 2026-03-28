@@ -1,9 +1,10 @@
 pub mod db;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Json, Router,
 };
@@ -12,8 +13,16 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sqlx::{sqlite::SqlitePool, Row};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
+
+const MAX_INSTANCE_ID_LEN: usize = 64;
+const MAX_ROLE_LEN: usize = 256;
+const MAX_CONTENT_LEN: usize = 4096;
+const MAX_REFS_COUNT: usize = 20;
+const MAX_REF_LEN: usize = 64;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MessageCreate {
@@ -51,9 +60,30 @@ pub struct PresenceUpdate {
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
+    pub token: Option<String>,
+}
+
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(expected) = &state.token {
+        let provided = request
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+
+        if provided != Some(expected.as_str()) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+    next.run(request).await
 }
 
 pub fn create_app(state: AppState) -> Router {
+    let shared_state = Arc::new(state);
     Router::new()
         .route("/", get(root))
         .route("/messages", post(create_message))
@@ -62,14 +92,19 @@ pub fn create_app(state: AppState) -> Router {
         .route("/roster", get(get_roster))
         .route("/presence/:instance_id", put(update_presence))
         .route("/messages/cleanup", delete(cleanup_old_messages))
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            auth_middleware,
+        ))
+        .layer(TimeoutLayer::new(StdDuration::from_secs(30)))
         .layer(CorsLayer::permissive())
-        .with_state(Arc::new(state))
+        .with_state(shared_state)
 }
 
 #[cfg(test)]
 pub async fn create_test_app() -> Router {
     let db = db::init_test_db().await.unwrap();
-    let state = AppState { db };
+    let state = AppState { db, token: None };
     create_app(state)
 }
 
@@ -84,6 +119,10 @@ async fn list_messages(
     Path(instance_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Message>>, StatusCode> {
+    if instance_id.len() > MAX_INSTANCE_ID_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
@@ -112,6 +151,10 @@ async fn get_history(
     Path(instance_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Message>>, StatusCode> {
+    if instance_id.len() > MAX_INSTANCE_ID_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
@@ -143,7 +186,6 @@ async fn get_roster(
     let one_hour_ago = Utc::now() - Duration::hours(1);
     let cutoff_iso = one_hour_ago.to_rfc3339();
 
-    // Get workers from presence table (announced themselves via watch)
     let presence_rows = sqlx::query(
         r#"
         SELECT instance_id, role, last_seen
@@ -160,7 +202,6 @@ async fn get_roster(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Get message counts for workers who have sent messages
     let message_rows = sqlx::query(
         r#"
         SELECT sender, COUNT(*) as message_count
@@ -203,7 +244,6 @@ async fn get_roster(
         })
         .collect();
 
-    // Also include any senders not in presence (sent messages but didn't watch)
     let present_ids: std::collections::HashSet<String> =
         workers.iter().map(|w| w.instance_id.clone()).collect();
 
@@ -248,8 +288,13 @@ async fn update_presence(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<PresenceUpdate>,
 ) -> Result<StatusCode, StatusCode> {
-    let now = Utc::now().to_rfc3339();
     let role = payload.role.unwrap_or_default();
+
+    if instance_id.len() > MAX_INSTANCE_ID_LEN || role.len() > MAX_ROLE_LEN {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    let now = Utc::now().to_rfc3339();
 
     sqlx::query(
         r#"
@@ -277,9 +322,17 @@ async fn create_message(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<MessageCreate>,
 ) -> Result<Json<Message>, StatusCode> {
+    if payload.sender.len() > MAX_INSTANCE_ID_LEN
+        || payload.recipient.len() > MAX_INSTANCE_ID_LEN
+        || payload.content.len() > MAX_CONTENT_LEN
+        || payload.refs.len() > MAX_REFS_COUNT
+        || payload.refs.iter().any(|r| r.len() > MAX_REF_LEN)
+    {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     let timestamp = Utc::now();
 
-    // Hash includes sender+recipient+content+timestamp to avoid collisions
     let mut hasher = Sha1::new();
     hasher.update(payload.sender.as_bytes());
     hasher.update(b"|");
@@ -340,7 +393,6 @@ async fn cleanup_old_messages(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Also clean up stale presence entries
     sqlx::query("DELETE FROM presence WHERE last_seen < ?")
         .bind(&cutoff_iso)
         .execute(&state.db)

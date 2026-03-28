@@ -17,14 +17,14 @@ use std::time::{Duration, Instant};
 
 use crate::client::{CollabClient, Message, WorkerInfo};
 
-pub async fn run(server: &str, instance_id: &str, interval_secs: u64) -> Result<()> {
+pub async fn run(server: &str, instance_id: &str, interval_secs: u64, token: Option<&str>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let client = CollabClient::new(server, instance_id);
+    let client = CollabClient::new(server, instance_id, token);
     let mut last_refresh = Instant::now() - Duration::from_secs(interval_secs + 1);
     let mut workers: Vec<WorkerInfo> = vec![];
     let mut messages: Vec<Message> = vec![];

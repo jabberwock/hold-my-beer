@@ -25,15 +25,25 @@ pub struct WorkerInfo {
 pub struct CollabClient {
     base_url: String,
     instance_id: String,
+    token: Option<String>,
     client: reqwest::Client,
 }
 
 impl CollabClient {
-    pub fn new(base_url: &str, instance_id: &str) -> Self {
+    pub fn new(base_url: &str, instance_id: &str, token: Option<&str>) -> Self {
         Self {
             base_url: base_url.to_string(),
             instance_id: instance_id.to_string(),
+            token: token.map(|t| t.to_string()),
             client: reqwest::Client::new(),
+        }
+    }
+
+    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(token) = &self.token {
+            req.header("Authorization", format!("Bearer {}", token))
+        } else {
+            req
         }
     }
 
@@ -44,8 +54,7 @@ impl CollabClient {
         }
 
         let url = format!("{}/presence/{}", self.base_url, self.instance_id);
-        self.client
-            .put(&url)
+        self.auth(self.client.put(&url))
             .json(&PresenceUpdate { role: role.map(|r| r.to_string()) })
             .send()
             .await?;
@@ -55,7 +64,7 @@ impl CollabClient {
     pub async fn list_messages(&self) -> Result<()> {
         let url = format!("{}/messages/{}", self.base_url, self.instance_id);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.auth(self.client.get(&url)).send().await?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to fetch messages: {}", response.status());
@@ -110,8 +119,7 @@ impl CollabClient {
 
         let url = format!("{}/messages", self.base_url);
 
-        let response = self.client
-            .post(&url)
+        let response = self.auth(self.client.post(&url))
             .json(&payload)
             .send()
             .await?;
@@ -197,7 +205,7 @@ impl CollabClient {
 
             // Poll for new messages
             let url = format!("{}/messages/{}", self.base_url, self.instance_id);
-            match self.client.get(&url).send().await {
+            match self.auth(self.client.get(&url)).send().await {
                 Ok(response) if response.status().is_success() => {
                     match response.json::<Vec<Message>>().await {
                         Ok(messages) => {
@@ -239,7 +247,7 @@ impl CollabClient {
 
     pub async fn fetch_roster_pub(&self) -> Result<Vec<WorkerInfo>> {
         let url = format!("{}/roster", self.base_url);
-        let response = self.client.get(&url).send().await?;
+        let response = self.auth(self.client.get(&url)).send().await?;
         if !response.status().is_success() {
             anyhow::bail!("Server error: {}", response.status());
         }
@@ -248,7 +256,7 @@ impl CollabClient {
 
     pub async fn fetch_history_pub(&self, instance_id: &str) -> Result<Vec<Message>> {
         let url = format!("{}/history/{}", self.base_url, instance_id);
-        let response = self.client.get(&url).send().await?;
+        let response = self.auth(self.client.get(&url)).send().await?;
         if !response.status().is_success() {
             anyhow::bail!("Server error: {}", response.status());
         }
@@ -258,7 +266,7 @@ impl CollabClient {
     pub async fn show_history(&self, filter_instance: Option<&str>) -> Result<()> {
         let url = format!("{}/history/{}", self.base_url, self.instance_id);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.auth(self.client.get(&url)).send().await?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to fetch history: {}", response.status());
@@ -374,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_collab_client_creation() {
-        let client = CollabClient::new("http://localhost:8000", "test-worker");
+        let client = CollabClient::new("http://localhost:8000", "test-worker", None);
         assert_eq!(client.base_url, "http://localhost:8000");
         assert_eq!(client.instance_id, "test-worker");
     }

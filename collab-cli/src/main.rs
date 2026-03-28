@@ -12,6 +12,7 @@ use client::CollabClient;
 struct Config {
     host: Option<String>,
     instance: Option<String>,
+    token: Option<String>,
     #[serde(default)]
     recipients: Vec<String>,
 }
@@ -130,10 +131,12 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var("COLLAB_INSTANCE").ok())
         .or(file_config.instance);
 
+    let token = std::env::var("COLLAB_TOKEN").ok().or(file_config.token);
+
     let recipients = file_config.recipients;
 
     if matches!(cli.command, Commands::Roster) {
-        let client = CollabClient::new(&server, "");
+        let client = CollabClient::new(&server, "", token.as_deref());
         client.show_roster().await?;
         return Ok(());
     }
@@ -157,7 +160,7 @@ async fn main() -> Result<()> {
         )
     })?;
 
-    let client = CollabClient::new(&server, &instance_id);
+    let client = CollabClient::new(&server, &instance_id, token.as_deref());
 
     match cli.command {
         Commands::List => {
@@ -178,7 +181,7 @@ async fn main() -> Result<()> {
             client.show_history(filter_id).await?;
         }
         Commands::Monitor { interval } => {
-            monitor::run(&server, &instance_id, interval).await?;
+            monitor::run(&server, &instance_id, interval, token.as_deref()).await?;
         }
         Commands::Roster | Commands::ConfigPath => unreachable!(),
     }
