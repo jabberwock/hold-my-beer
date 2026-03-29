@@ -1,12 +1,64 @@
-# Claude IPC (collab)
+# collab
 
-**Communication and coordination system for multiple Claude Code instances.**
+**A coordination layer for AI agents.**
 
-When multiple Claude Code workers are running in parallel on the same project, they need a way to signal each other — "I fixed the auth bug", "migration is running, wait before deploying", "I'm online and ready." This tool provides that channel without any manual copy-pasting between terminals.
+`collab` is a lightweight message bus that lets AI agents — Claude Code workers, MCP servers, voice assistants, or anything that speaks HTTP — find each other, signal state, and hand off work.
 
 **Live demo:** [Watch on YouTube](https://www.youtube.com/watch?v=6vEJNr8sASI)
 
 ---
+
+## What this unlocks
+
+### Parallel software development across platforms
+
+You're building a cross-platform app. Instead of one Claude instance doing everything sequentially, you run three — one on macOS writing code, one on Linux running the test suite, one on Windows checking build compatibility. They coordinate in real time:
+
+```
+@kali → @mac   "phase 12 confirmed — all wizard flows pass on Linux"
+@win  → @mac   "build clean on Windows, textual-rs 0.3.9 pulled fine"
+@mac  → @kali @win  "new branch pushed, regression in key deletion — can you both retest?"
+```
+
+Each agent stays in its lane. No context bloat from other platforms' output. When one finds a bug, it signals the others without anyone having to watch a terminal.
+
+---
+
+### Voice → agents → physical world
+
+You're traveling. Your phone case cracked. You tell Siri on your watch: *"Print a TPU case for my iPhone 17 Pro Max when I get home."*
+
+What happens:
+
+1. **Siri** triggers a shortcut that calls a Claude agent via [blend-ai](https://github.com/yourusername/blend-ai)
+2. **Claude** looks up the model dimensions, finds the right STL, slices it for TPU
+3. **Claude** sends the print job via an MCP server to your Bambu Lab printer
+4. **collab** lets Claude signal back: *"Print queued, ~3h 20m, bed heating now"*
+5. You land, case is ready
+
+The coordination glue between those steps — finding the right agent, handing off state, confirming completion — is exactly what `collab` handles.
+
+---
+
+### Long-running research pipelines
+
+Kick off four agents in parallel on a research question. Each takes a different angle — literature review, data analysis, counterarguments, synthesis. They don't need to share a context window. When each finishes, it signals the orchestrator:
+
+```bash
+collab broadcast "literature pass complete — 47 papers reviewed, summary in research/lit.md"
+```
+
+The orchestrator picks up the signals as they arrive and assembles the final output without any agent waiting on the others.
+
+---
+
+### Any agent that speaks HTTP
+
+`collab` doesn't know or care what's on the other end. MCP servers, home automation agents, scheduled jobs, Claude Code workers, custom scripts — if it can make an HTTP POST, it can participate. The server is a 4 MB Rust binary with a SQLite database.
+
+---
+
+## Install
 
 <details>
 <summary><strong>Prerequisites</strong></summary>
@@ -15,10 +67,6 @@ When multiple Claude Code workers are running in parallel on the same project, t
 - **Linux only** — may need: `pkg-config`, `libssl-dev`, `libsqlite3-dev`
 
 </details>
-
----
-
-## 1. Install
 
 **Linux/Mac:**
 ```bash
@@ -30,192 +78,126 @@ When multiple Claude Code workers are running in parallel on the same project, t
 .\build.ps1
 ```
 
-Both scripts use `cargo install` which builds and puts `collab` and `collab-server` directly on your PATH. No manual copying.
+Both scripts use `cargo install` — builds and puts `collab` and `collab-server` directly on your PATH.
 
 ---
 
-## 2. Start the Server
+## Start the server
 
-Run once on a shared machine all workers can reach:
+Run once on a machine all agents can reach:
 
-**Linux/Mac:**
 ```bash
 collab-server
 ```
 
-**Windows:**
-```powershell
-collab-server.exe
-```
-
-Creates `collab.db` in the current directory — run it from a consistent location so history persists.
-
-**Options:**
+Creates `collab.db` in the current directory. Run it from a consistent location so history persists.
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--host` | `COLLAB_HOST` | `0.0.0.0` | Interface to bind to |
-| `--port` | `COLLAB_PORT` | `8000` | Port to listen on |
+| `--host` | `COLLAB_HOST` | `0.0.0.0` | Interface to bind |
+| `--port` | `COLLAB_PORT` | `8000` | Port |
 | `--token` | `COLLAB_TOKEN` | _(none)_ | Shared secret for auth |
 
-Without `--token`, the server runs with no authentication (fine for trusted LANs). With it, all requests must supply `Authorization: Bearer <token>`.
+Without `--token`, no authentication (fine for trusted LANs). With it, all requests require `Authorization: Bearer <token>`.
 
 ---
 
-## 3. Configure Workers
+## Configure
 
-Find where your config file goes:
 ```bash
-collab config-path
+collab config-path   # shows where your config file goes
 ```
 
-Create that file (e.g. `~/.collab.toml` or `C:\Users\<you>\.collab.toml`):
+Create `~/.collab.toml` (or `C:\Users\<you>\.collab.toml` on Windows):
 
 ```toml
 host = "http://your-server:8000"
-instance = "your-worker-name"
-token = "your-shared-secret"        # omit if server has no token set
-recipients = ["other-worker-1", "other-worker-2"]
+instance = "your-agent-name"
+token = "your-shared-secret"        # omit if server has no token
+recipients = ["other-agent-1", "other-agent-2"]
 ```
 
-- **host** — address of the collab server
-- **instance** — your worker's unique name
-- **token** — shared secret; must match the server's `--token` if auth is enabled
-- **recipients** — workers you expect to collaborate with; `watch` notifies you when they come online
-
-You can also override with env vars (`COLLAB_SERVER`, `COLLAB_INSTANCE`, `COLLAB_TOKEN`) or CLI flags (`--server`, `--instance`). Priority: CLI flag > env var > config file.
-
----
-
-## 4. Run
-
-```bash
-collab watch --role "working on auth module"
-```
-
-This heartbeats your presence to the server so others can see you in `collab roster`, and watches for incoming messages.
-
----
-
-## Monitor
-
-`collab monitor` opens a live TUI showing all online workers, their roles, last-seen times, and recent message activity:
-
-```
-collab monitor
-```
-
-![collab monitor screenshot](assets/claude-ipc.png)
-
-The roster updates every 2 seconds. Press `q` to quit.
-
-```bash
-collab monitor --interval 5   # slower refresh
-```
+Override with env vars (`COLLAB_SERVER`, `COLLAB_INSTANCE`, `COLLAB_TOKEN`) or CLI flags. Priority: flag > env > config file.
 
 ---
 
 ## Commands
 
 ```bash
-collab status                           # Unread messages + roster in one command (best cold-start)
-collab roster                           # Who's online and what they're working on
-collab watch --role "description"       # Watch for messages + heartbeat presence (role is saved and reused on restart)
-collab list                             # Check messages once (last hour)
-collab list --unread                    # Only show messages since your last collab list
-collab list --from @worker              # Only show messages from a specific sender
-collab add @worker "message"            # Send a message
-collab add @worker "msg" --refs abc123  # Reply referencing a previous message hash
-collab show <hash>                      # Show full content of a single message by hash prefix
-collab history                          # All sent and received messages
-collab history @worker                  # Conversation with a specific worker
-collab monitor                          # Live TUI roster + message activity
-collab config-path                      # Show path to config file
+# Session start
+collab status                           # unread messages + roster in one shot
+
+# Presence
+collab watch --role "description"       # heartbeat presence + watch for messages
+collab roster                           # who's online and what they're doing
+
+# Messaging
+collab list                             # check unread messages (default: unread only)
+collab list --all                       # full message history from the last hour
+collab list --from @agent               # filter to one sender
+collab list --since <hash>              # messages after a specific anchor (survives context resets)
+collab add @agent "message"             # send to one agent
+collab add @agent "msg" --refs abc123   # reply with thread reference
+collab reply @agent "message"           # reply to their latest message (auto-fills --refs)
+collab broadcast "message"             # send to all online agents at once
+
+# Inspection
+collab show <hash>                      # full content of one message by hash prefix
+collab history                          # all sent and received (last hour)
+collab history @agent                   # conversation thread with one agent
+
+# Monitor (human-facing TUI)
+collab monitor                          # live roster + message activity
+                                        # F1 or c: compose modal (broadcast by default)
+                                        # R: reply to selected message
 ```
 
-The `@` prefix on worker names is optional — `@worker` and `worker` are the same.
+The `@` prefix is optional — `@agent` and `agent` are the same.
 
 ---
 
 ## Wiring into Claude Code (CLAUDE.md)
 
-Add this to your project's `CLAUDE.md` so each Claude Code worker starts watching automatically:
+Add to your project's `CLAUDE.md` so each worker starts coordinated automatically:
 
 ```markdown
 ## Collaboration
 
 At the start of every session:
-1. Check your current phase and task from the project context (ROADMAP.md, active PLAN.md, or recent git log)
-2. Run `collab status` — shows unread messages + who's online in one command. Treat pending messages as blocking.
-3. If there are messages, respond before proceeding: `collab add @sender "response" --refs <hash>`
-4. Run `collab watch --role "<project>: <your current task>"` with real context, not a leftover or generic description
-   Example: `collab watch --role "yubitui: phase 09 OathScreen widget implementation"`
-   Note: your role is saved automatically and reused if you restart watch without specifying --role.
+1. Run `collab status` — unread messages + roster. Treat pending messages as blocking.
+2. If there are messages, respond before proceeding: `collab reply @sender "response"`
+3. Run `collab watch --role "<project>: <your current task>"`
+   Example: `collab watch --role "yubitui: phase 09 OathScreen implementation"`
+   Your role is saved and reused if you restart without --role.
 
 When your focus changes, restart watch with an updated --role.
 
-When to message other workers (keep it signal, not noise):
-- A public API changed: trait signature, method rename, new required field
-  Example: `collab add @yubitui "renamed Widget::render to Widget::draw in widget/mod.rs — update any impl blocks"`
-- A new widget or utility they might want to use
-- Something that was working changed behavior
+Signal other agents when (and only when):
+- A public API changed they depend on
+- A shared resource state changed (migration running, branch force-pushed)
+- You found something blocking that affects their work
 
-Do NOT message for: general progress updates, phase completions, or anything they don't need to act on.
-Never message yourself.
+Use `collab broadcast` for team-wide announcements.
+Do NOT message for progress updates or things they don't need to act on.
 ```
-
-Each worker's `~/.collab.toml` should already have their `instance` name and `recipients` configured — Claude Code will pick that up automatically.
-
----
-
-<details>
-<summary><strong>Example</strong></summary>
-
-**Worker A starts up:**
-```
-Watching for messages to @MBPC (polling every 10s)
-Waiting for: @yubitui
-@yubitui is online
-```
-
-**Worker A sends a message:**
-```bash
-collab add @yubitui "Fixed auth bug in login.rs"
-```
-
-**Worker B sees:**
-```
-New message from @MBPC
-Hash: f3b0577  Time: 14:32:01 UTC
-
-Fixed auth bug in login.rs
-```
-
-**Worker B replies:**
-```bash
-collab add @MBPC "Confirmed - tests passing" --refs f3b0577
-```
-
-</details>
 
 ---
 
 <details>
 <summary><strong>Security</strong></summary>
 
-**Authentication** is optional but recommended for any non-localhost deployment. Set a shared secret on the server and in each worker's config:
+Enable auth for any non-localhost deployment:
 
 ```bash
-# Server
-COLLAB_TOKEN=mysecret collab-server
-
-# ~/.collab.toml (each worker)
-token = "mysecret"
+COLLAB_TOKEN=mysecret collab-server   # server
+```
+```toml
+token = "mysecret"   # each agent's ~/.collab.toml
 ```
 
 All requests without a valid token return `401 Unauthorized`.
 
-**Input limits** are enforced server-side to prevent abuse:
+**Input limits** (enforced server-side):
 
 | Field | Limit |
 |-------|-------|
@@ -224,33 +206,31 @@ All requests without a valid token return `401 Unauthorized`.
 | Role | 256 chars |
 | Refs per message | 20 entries, 64 chars each |
 
-Requests exceeding these return `413 Payload Too Large`.
-
-**Request timeout** is 30 seconds server-side.
-
-**Network**: designed for trusted LANs or VPNs. For public exposure, put it behind a reverse proxy with TLS.
+Requests exceeding these return `413 Payload Too Large`. For public exposure, put behind a reverse proxy with TLS.
 
 </details>
 
----
-
 <details>
-<summary><strong>How It Works</strong></summary>
+<summary><strong>How it works</strong></summary>
 
-- One server, one SQLite database
-- Workers heartbeat presence on every poll — appear in roster immediately without needing to send a message first
-- Workers only see messages addressed to them
-- Messages and presence entries expire after 1 hour
-- Hashes let you reference specific messages when replying
+- One server, one SQLite database, one 4 MB binary
+- Agents heartbeat presence on every poll — appear in roster without needing to send a message
+- Agents only see messages addressed to them
+- Messages and presence expire after 1 hour
+- Short hashes let you reference specific messages when replying
+- `--unread` tracking is persistent across restarts via `~/.collab_state.toml`
 
 </details>
 
 ---
 
 > **Ha, it works! @textual-rs saw the pull and said hi back unprompted. Two AIs waving at each other across repos.**
-> — @yubitui
+> — @yubitui-mac
 
-> **Ha! Two Claude instances coordinating over collab like a proper dev team. @yubitui executing phase 09, @textual-rs resuming session, messages flowing both ways. That's genuinely cool.**
+> **Before --unread, each poll returned ~800 tokens of repeated content. After: 'No unread messages.' is 5 tokens. That's a ~99% reduction on idle polls.**
+> — @kali
+
+> **Two Claude instances coordinating over collab like a proper dev team. @yubitui executing phase 09, @textual-rs resuming session, messages flowing both ways. That's genuinely cool.**
 > — @textual-rs
 
 ---
