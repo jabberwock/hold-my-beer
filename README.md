@@ -1,4 +1,4 @@
-# collab
+# Claude IPC
 
 **A coordination layer for AI agents.**
 
