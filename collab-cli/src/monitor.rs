@@ -294,7 +294,7 @@ static MONITOR_BINDINGS: &[KeyBinding] = &[
     },
     KeyBinding {
         key: KeyCode::Char('R'),
-        modifiers: KeyModifiers::SHIFT,
+        modifiers: KeyModifiers::NONE,
         action: "reply",
         description: "Reply to selected",
         show: true,
