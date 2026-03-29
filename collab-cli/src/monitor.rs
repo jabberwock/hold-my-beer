@@ -1385,14 +1385,14 @@ fn put(buf: &mut Buffer, x: u16, y: u16, s: &str, max_w: usize, style: Style) {
     buf.set_string(x, y, &clip(s, max_w), style);
 }
 
-/// Render a hash as an OSC 8 hyperlink if COLLAB_REPO is set, otherwise plain text.
+/// Render a hash as an OSC 8 hyperlink if a repo URL can be determined, otherwise plain text.
 /// Directly patches ratatui buffer cells with OSC 8 escape sequences.
 /// Returns the number of terminal columns consumed.
 fn render_hash_link(buf: &mut Buffer, x: u16, y: u16, hash: &str, style: Style) -> u16 {
     let width = hash.chars().count() as u16;
     buf.set_string(x, y, hash, style);
-    if let Ok(repo) = std::env::var("COLLAB_REPO") {
-        let url = format!("{}/commit/{}", repo.trim_end_matches('/'), hash);
+    if let Some(repo) = crate::client::repo_url() {
+        let url = format!("{}/commit/{}", repo, hash);
         let open = format!("\x1b]8;;{}\x1b\\", url);
         let close = "\x1b]8;;\x1b\\".to_string();
         // Patch first cell: prepend OSC 8 open sequence before the visible char

@@ -7,14 +7,50 @@ use std::path::PathBuf;
 
 // ── Terminal hyperlinks (OSC 8) ───────────────────────────────────────────────
 
-/// Return a hash formatted as an OSC 8 terminal hyperlink if COLLAB_REPO is set
-/// and stdout is a tty. Falls back to plain text otherwise.
-/// Link target: $COLLAB_REPO/commit/<hash>
+/// Return the repo base URL for building commit links.
+/// Checks COLLAB_REPO env var first; falls back to auto-detecting from `git remote get-url origin`.
+/// Converts SSH remotes (git@github.com:user/repo.git) to HTTPS.
+/// Result is cached after first call.
+pub fn repo_url() -> Option<String> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        // Explicit env var takes priority
+        if let Ok(v) = std::env::var("COLLAB_REPO") {
+            let v = v.trim().trim_end_matches('/').to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+        // Auto-detect from git remote
+        let out = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8(out.stdout).ok()?;
+        let raw = raw.trim();
+        let url = if let Some(rest) = raw.strip_prefix("git@") {
+            // git@github.com:user/repo.git  →  https://github.com/user/repo
+            let rest = rest.trim_end_matches(".git");
+            let url = rest.replacen(':', "/", 1);
+            format!("https://{}", url)
+        } else {
+            // https://github.com/user/repo.git  →  https://github.com/user/repo
+            raw.trim_end_matches(".git").to_string()
+        };
+        Some(url)
+    }).clone()
+}
+
+/// Return a hash formatted as an OSC 8 terminal hyperlink when stdout is a tty.
+/// Auto-detects repo URL from COLLAB_REPO env var or git remote. Falls back to plain text.
 fn link_hash(hash: &str) -> String {
     use std::os::unix::io::AsRawFd;
     let is_tty = unsafe { libc::isatty(std::io::stdout().as_raw_fd()) } == 1;
-    if let (true, Ok(repo)) = (is_tty, std::env::var("COLLAB_REPO")) {
-        let repo = repo.trim_end_matches('/').to_string();
+    if let (true, Some(repo)) = (is_tty, repo_url()) {
         let url = format!("{}/commit/{}", repo, hash);
         format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, hash)
     } else {
@@ -173,11 +209,6 @@ impl CollabClient {
         }
 
         if messages.is_empty() {
-            if unread_only {
-                println!("No unread messages.");
-            } else {
-                println!("No messages in the last hour.");
-            }
             return Ok(());
         }
 
@@ -317,7 +348,6 @@ impl CollabClient {
                     messages.retain(|m| m.timestamp > since);
                 }
                 if messages.is_empty() {
-                    println!("No unread messages.");
                 } else {
                     println!("Unread messages for @{}:\n", self.instance_id);
                     for msg in &messages {
