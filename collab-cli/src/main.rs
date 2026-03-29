@@ -129,6 +129,17 @@ enum Commands {
         role: Option<String>,
     },
 
+    /// Send a message to all currently active workers (everyone in the roster except you)
+    Broadcast {
+        /// Message content
+        #[arg(value_name = "MESSAGE")]
+        message: String,
+
+        /// Reference message hash(es) - comma-separated
+        #[arg(short, long, value_name = "HASH1,HASH2")]
+        refs: Option<String>,
+    },
+
     /// View message history including sent and received messages
     History {
         /// Filter by conversation partner (e.g., @other_instance)
@@ -220,6 +231,12 @@ async fn main() -> Result<()> {
         Commands::Watch { interval, role } => {
             client.watch_messages(interval, role, recipients).await?;
         }
+        Commands::Broadcast { message, refs } => {
+            let ref_hashes = refs.map(|r| {
+                r.split(',').map(|s| s.trim().to_string()).collect()
+            });
+            client.broadcast(&message, ref_hashes).await?;
+        }
         Commands::History { filter } => {
             let filter_id = filter.as_deref().map(|s| s.trim_start_matches('@'));
             client.show_history(filter_id).await?;
@@ -236,6 +253,8 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| Err(anyhow::anyhow!("monitor panicked")))?;
         }
         Commands::Roster | Commands::ConfigPath => unreachable!(),
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
     }
 
     Ok(())

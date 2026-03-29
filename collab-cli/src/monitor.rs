@@ -109,6 +109,8 @@ struct MonitorScreen {
     /// Scroll offset in display order.
     msg_scroll: Cell<usize>,
     error: RefCell<Option<String>>,
+    /// Transient status shown in footer (e.g. "No other workers online")
+    status_msg: RefCell<Option<String>>,
     own_id: Cell<Option<WidgetId>>,
     /// Y of the first message data row; updated each render for click hit-testing.
     msg_data_start_y: Cell<u16>,
@@ -130,6 +132,7 @@ impl MonitorScreen {
             msg_cursor: Cell::new(0),
             msg_scroll: Cell::new(0),
             error: RefCell::new(None),
+            status_msg: RefCell::new(None),
             own_id: Cell::new(None),
             msg_data_start_y: Cell::new(0),
             next_fetch_at: Cell::new(None),
@@ -184,8 +187,10 @@ impl MonitorScreen {
             .filter(|w| w.instance_id != self.instance_id)
             .collect();
         if others.is_empty() {
+            *self.status_msg.borrow_mut() = Some("No other workers online — press r to refresh".to_string());
             return;
         }
+        *self.status_msg.borrow_mut() = None;
         // Pre-select all; if replying, only pre-select the reply target
         let selected: Vec<bool> = others.iter().map(|w| {
             match &reply_to {
@@ -292,7 +297,7 @@ static MONITOR_BINDINGS: &[KeyBinding] = &[
     },
     KeyBinding {
         key: KeyCode::Char('R'),
-        modifiers: KeyModifiers::SHIFT,
+        modifiers: KeyModifiers::NONE,
         action: "reply",
         description: "Reply to selected",
         show: true,
@@ -638,8 +643,11 @@ impl Widget for MonitorScreen {
 
         // ── Footer ────────────────────────────────────────────────────────────
         fill_line(buf, area.x, footer_y, area.width, dim);
+        let status_msg = self.status_msg.borrow();
         let footer_text = if let Some(ref e) = *error {
             format!(" Error: {}", e)
+        } else if let Some(ref s) = *status_msg {
+            format!(" {}", s)
         } else {
             format!(" ↑↓ Navigate  │  Enter View  │  F1/c Compose  │  R Reply  │  r Refresh  │  q Quit")
         };

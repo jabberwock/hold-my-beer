@@ -386,6 +386,26 @@ impl CollabClient {
         Ok(())
     }
 
+    pub async fn broadcast(&self, content: &str, refs: Option<Vec<String>>) -> Result<()> {
+        let workers = self.fetch_roster_pub().await?;
+        let others: Vec<_> = workers.iter()
+            .filter(|w| w.instance_id != self.instance_id)
+            .collect();
+        if others.is_empty() {
+            println!("No other workers online.");
+            return Ok(());
+        }
+        let ref_hashes = refs.unwrap_or_default();
+        println!("Broadcasting to {} worker(s)...", others.len());
+        for worker in &others {
+            match self.send_message_raw(&worker.instance_id, content, ref_hashes.clone()).await {
+                Ok(msg) => println!("  ✓ @{}  [{}]", worker.instance_id, &msg.hash[..7]),
+                Err(e)  => println!("  ✗ @{}  {}", worker.instance_id, e),
+            }
+        }
+        Ok(())
+    }
+
     pub async fn watch_messages(
         &self,
         interval_secs: u64,
