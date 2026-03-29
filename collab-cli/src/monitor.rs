@@ -95,6 +95,57 @@ async fn fetch_data(server: String, instance_id: String, token: Option<String>) 
     }
 }
 
+// ── ComposeField / ComposeState ───────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum ComposeField { Recipients, Message }
+
+struct ComposeState {
+    workers: Vec<WorkerInfo>,
+    selected: Vec<bool>,
+    list_cursor: usize,
+    list_scroll: usize,
+    focused: ComposeField,
+    message: String,
+    reply_hash: Option<String>,
+    sending: bool,
+    error: Option<String>,
+    list_visible_rows: usize,
+}
+
+impl ComposeState {
+    fn new(workers: Vec<WorkerInfo>, selected: Vec<bool>, reply_hash: Option<String>) -> Self {
+        Self {
+            workers,
+            selected,
+            list_cursor: 0,
+            list_scroll: 0,
+            focused: ComposeField::Recipients,
+            message: String::new(),
+            reply_hash,
+            sending: false,
+            error: None,
+            list_visible_rows: 4,
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        let visible = self.list_visible_rows.max(1);
+        if self.list_cursor < self.list_scroll {
+            self.list_scroll = self.list_cursor;
+        } else if self.list_cursor >= self.list_scroll + visible {
+            self.list_scroll = self.list_cursor + 1 - visible;
+        }
+    }
+
+    fn selected_recipients(&self) -> Vec<String> {
+        self.workers.iter().enumerate()
+            .filter(|(i, _)| self.selected.get(*i).copied().unwrap_or(false))
+            .map(|(_, w)| w.instance_id.clone())
+            .collect()
+    }
+}
+
 // ── MonitorScreen ─────────────────────────────────────────────────────────────
 
 struct MonitorScreen {
@@ -118,6 +169,8 @@ struct MonitorScreen {
     next_fetch_at: Cell<Option<Instant>>,
     /// Tracks last click (time + display index) for double-click detection.
     last_click: RefCell<Option<(Instant, usize)>>,
+    /// When Some, the compose overlay is open.
+    compose: RefCell<Option<ComposeState>>,
 }
 
 impl MonitorScreen {
@@ -137,6 +190,7 @@ impl MonitorScreen {
             msg_data_start_y: Cell::new(0),
             next_fetch_at: Cell::new(None),
             last_click: RefCell::new(None),
+            compose: RefCell::new(None),
         }
     }
 
@@ -181,7 +235,7 @@ impl MonitorScreen {
         ctx.push_screen_deferred(Box::new(ModalScreen::new(Box::new(dialog))));
     }
 
-    fn open_compose(&self, ctx: &AppContext, reply_hash: Option<String>, reply_to: Option<String>) {
+    fn open_compose(&self, reply_hash: Option<String>, reply_to: Option<String>) {
         let workers = self.workers.borrow().clone();
         let others: Vec<WorkerInfo> = workers.into_iter()
             .filter(|w| w.instance_id != self.instance_id)
@@ -191,25 +245,16 @@ impl MonitorScreen {
             return;
         }
         *self.status_msg.borrow_mut() = None;
-        // Pre-select all; if replying, only pre-select the reply target
         let selected: Vec<bool> = others.iter().map(|w| {
             match &reply_to {
                 Some(id) => &w.instance_id == id,
                 None => true,
             }
         }).collect();
-        let modal = ComposeModal::new(
-            self.server.clone(),
-            self.instance_id.clone(),
-            self.token.clone(),
-            others,
-            selected,
-            reply_hash,
-        );
-        ctx.push_screen_deferred(Box::new(ModalScreen::new(Box::new(modal))));
+        *self.compose.borrow_mut() = Some(ComposeState::new(others, selected, reply_hash));
     }
 
-    fn open_reply(&self, ctx: &AppContext) {
+    fn open_reply(&self) {
         let messages = self.messages.borrow();
         let len = messages.len();
         if len == 0 { return; }
@@ -218,9 +263,263 @@ impl MonitorScreen {
         if vec_idx >= len { return; }
         let msg = messages[vec_idx].clone();
         drop(messages);
-        // Only reply to incoming messages
         if msg.sender == self.instance_id { return; }
-        self.open_compose(ctx, Some(msg.hash), Some(msg.sender));
+        self.open_compose(Some(msg.hash), Some(msg.sender));
+    }
+
+    fn handle_compose_key(&self, key: &KeyEvent, ctx: &AppContext) {
+        match key.code {
+            KeyCode::Esc => {
+                *self.compose.borrow_mut() = None;
+            }
+            KeyCode::Tab => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    c.focused = match c.focused {
+                        ComposeField::Recipients => ComposeField::Message,
+                        ComposeField::Message => ComposeField::Recipients,
+                    };
+                }
+            }
+            KeyCode::Enter => {
+                let should_send = {
+                    let compose = self.compose.borrow();
+                    compose.as_ref().map(|c| c.focused == ComposeField::Message).unwrap_or(false)
+                };
+                if should_send {
+                    self.compose_send(ctx);
+                } else {
+                    let mut compose = self.compose.borrow_mut();
+                    if let Some(ref mut c) = *compose {
+                        c.focused = ComposeField::Message;
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    if c.focused == ComposeField::Recipients && c.list_cursor > 0 {
+                        c.list_cursor -= 1;
+                        c.clamp_scroll();
+                    }
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    if c.focused == ComposeField::Recipients {
+                        let len = c.workers.len();
+                        if c.list_cursor + 1 < len {
+                            c.list_cursor += 1;
+                            c.clamp_scroll();
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(' ') => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    if c.focused == ComposeField::Recipients {
+                        let cur = c.list_cursor;
+                        if let Some(v) = c.selected.get_mut(cur) { *v = !*v; }
+                    }
+                }
+            }
+            KeyCode::Char('a') => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    if c.focused == ComposeField::Recipients {
+                        let any_unchecked = c.selected.iter().any(|&v| !v);
+                        for v in c.selected.iter_mut() { *v = any_unchecked; }
+                    }
+                }
+            }
+            KeyCode::Char(ch) => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    if c.focused == ComposeField::Message && !c.sending {
+                        c.message.push(ch);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                let mut compose = self.compose.borrow_mut();
+                if let Some(ref mut c) = *compose {
+                    if c.focused == ComposeField::Message {
+                        c.message.pop();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn compose_send(&self, ctx: &AppContext) {
+        let (message, recipients, reply_hash) = {
+            let mut compose = self.compose.borrow_mut();
+            let c = match compose.as_mut() { Some(c) => c, None => return };
+            let message = c.message.trim().to_string();
+            if message.is_empty() {
+                c.error = Some("Message cannot be empty".to_string());
+                return;
+            }
+            let recipients = c.selected_recipients();
+            if recipients.is_empty() {
+                c.error = Some("Select at least one recipient".to_string());
+                return;
+            }
+            c.sending = true;
+            c.error = None;
+            (message, recipients, c.reply_hash.clone())
+        };
+
+        // Persist last recipient
+        let mut state = load_read_state();
+        if let Some(r) = recipients.first() {
+            state.last_compose_recipient.insert(self.instance_id.clone(), r.clone());
+            save_read_state(&state);
+        }
+
+        let Some(id) = self.own_id.get() else { return };
+        ctx.run_worker(id, send_to_all(
+            self.server.clone(),
+            self.instance_id.clone(),
+            self.token.clone(),
+            recipients,
+            message,
+            reply_hash,
+        ));
+    }
+
+    fn render_compose(&self, area: Rect, buf: &mut Buffer) {
+        let compose = self.compose.borrow();
+        let c = match compose.as_ref() { Some(c) => c, None => return };
+
+        // Dim everything
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(Color::Rgb(5, 5, 15));
+                    cell.set_fg(Color::DarkGray);
+                }
+            }
+        }
+
+        let n_workers = c.workers.len();
+        let list_rows = n_workers.min(6);
+        let dlg_h = (8 + list_rows as u16).min(area.height.saturating_sub(2));
+        let dlg_w = ((area.width as usize * 8 / 10) as u16).min(90).max(50);
+        let dlg_x = area.x + area.width.saturating_sub(dlg_w) / 2;
+        let dlg_y = area.y + area.height.saturating_sub(dlg_h) / 2;
+
+        let bg_style = Style::default().bg(Color::Rgb(15, 15, 30)).fg(Color::White);
+        for y in dlg_y..dlg_y + dlg_h {
+            fill_line(buf, dlg_x, y, dlg_w, bg_style);
+        }
+
+        let border_col = if c.sending { Color::Yellow } else { Color::Cyan };
+        draw_box(buf, dlg_x, dlg_y, dlg_w, dlg_h, border_col);
+
+        let title = if c.sending { " Sending… " }
+                    else if c.reply_hash.is_some() { " Reply " }
+                    else { " New Message " };
+        let title_x = dlg_x + dlg_w.saturating_sub(title.len() as u16) / 2;
+        buf.set_string(title_x, dlg_y, title,
+            Style::default().fg(Color::Black).bg(border_col).add_modifier(Modifier::BOLD));
+
+        let dim = Style::default().fg(Color::DarkGray);
+        let inner_x = dlg_x + 2;
+        let inner_w = dlg_w.saturating_sub(4) as usize;
+        let mut y = dlg_y + 2;
+        let max_y = dlg_y + dlg_h - 1;
+
+        // Recipient list
+        let list_focused = c.focused == ComposeField::Recipients;
+        let lc = least_capacitated(&c.workers, &self.instance_id);
+        let lbl_style = if list_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else { dim };
+        let selected_count = c.selected.iter().filter(|&&v| v).count();
+        let rcpt_label = format!("Recipients: {}/{} selected  (Space toggle, a all/none)", selected_count, n_workers);
+        if y < max_y { buf.set_string(inner_x, y, &clip(&rcpt_label, inner_w), lbl_style); y += 1; }
+
+        let available_list = (max_y.saturating_sub(y + 4)) as usize;
+        let visible = available_list.min(n_workers).max(1);
+
+        // Clamp scroll for rendering (compute manually since we have an immutable borrow)
+        let scroll = {
+            let mut s = c.list_scroll;
+            if c.list_cursor < s { s = c.list_cursor; }
+            else if c.list_cursor >= s + visible { s = c.list_cursor + 1 - visible; }
+            s
+        };
+
+        for row in 0..visible {
+            let idx = scroll + row;
+            if idx >= n_workers { break; }
+            if y >= max_y { break; }
+            let worker = &c.workers[idx];
+            let checked = c.selected.get(idx).copied().unwrap_or(false);
+            let is_cursor = list_focused && idx == c.list_cursor;
+            let star = if Some(worker.instance_id.as_str()) == lc { " ★" } else { "" };
+            let check = if checked { "✓" } else { " " };
+            let scroll_marker = if idx == scroll && scroll > 0 { "↑" }
+                                 else if idx == scroll + visible - 1 && scroll + visible < n_workers { "↓" }
+                                 else { " " };
+            let row_text = format!(" [{}]{} @{}{}", check, scroll_marker, worker.instance_id, star);
+            let row_style = if is_cursor {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if checked {
+                Style::default().fg(Color::Green)
+            } else {
+                dim
+            };
+            if is_cursor {
+                fill_line(buf, inner_x, y, inner_w as u16, row_style);
+            }
+            buf.set_string(inner_x, y, &clip(&row_text, inner_w), row_style);
+            y += 1;
+        }
+
+        y += 1;
+
+        // Message field
+        let msg_focused = c.focused == ComposeField::Message;
+        let msg_lbl_style = if msg_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else { dim };
+        if y < max_y {
+            buf.set_string(inner_x, y, "Message:", msg_lbl_style);
+            y += 1;
+        }
+        if y < max_y {
+            let display = if msg_focused {
+                let s = tail_chars(&c.message, inner_w.saturating_sub(1));
+                format!("{}|", s)
+            } else {
+                tail_chars(&c.message, inner_w)
+            };
+            let msg_bg = if msg_focused {
+                Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 50))
+            } else {
+                Style::default().fg(Color::White)
+            };
+            fill_line(buf, inner_x, y, inner_w as u16, msg_bg);
+            buf.set_string(inner_x, y, &display, msg_bg);
+        }
+
+        // Error
+        if let Some(ref e) = c.error {
+            let ey = dlg_y + dlg_h - 3;
+            if ey > dlg_y + 2 {
+                put(buf, inner_x, ey, e, inner_w, Style::default().fg(Color::Red));
+            }
+        }
+
+        // Footer hint
+        let hint = " [Tab] Switch  [↑↓] Navigate  [Space] Toggle  [Enter] Send  [Esc] Cancel ";
+        let hint_x = dlg_x + dlg_w.saturating_sub(hint.len() as u16) / 2;
+        buf.set_string(hint_x, dlg_y + dlg_h - 1, &clip(hint, dlg_w as usize), dim);
     }
 }
 
@@ -336,14 +635,27 @@ impl Widget for MonitorScreen {
                 }
             }
             "view_message" => self.open_modal(ctx),
-            "compose" => self.open_compose(ctx, None, None),
-            "reply" => self.open_reply(ctx),
+            "compose" => self.open_compose(None, None),
+            "reply" => self.open_reply(),
             _ => {}
         }
     }
 
     fn on_event(&self, event: &dyn std::any::Any, ctx: &AppContext) -> EventPropagation {
-        // Worker result
+        // Send result for compose overlay
+        if let Some(result) = event.downcast_ref::<WorkerResult<SendResult>>() {
+            let mut compose = self.compose.borrow_mut();
+            if let Some(ref mut c) = *compose {
+                c.sending = false;
+                match &result.value {
+                    Ok(_) => { drop(compose); *self.compose.borrow_mut() = None; }
+                    Err(e) => c.error = Some(e.clone()),
+                }
+            }
+            return EventPropagation::Stop;
+        }
+
+        // Worker result (fetch)
         if let Some(result) = event.downcast_ref::<WorkerResult<Result<FetchData, String>>>() {
             match &result.value {
                 Ok((workers, messages)) => {
@@ -359,6 +671,19 @@ impl Widget for MonitorScreen {
                 Err(e) => {
                     *self.error.borrow_mut() = Some(e.clone());
                 }
+            }
+            return EventPropagation::Stop;
+        }
+
+        // When compose is open, handle all key and mouse events here
+        if self.compose.borrow().is_some() {
+            if let Some(key) = event.downcast_ref::<KeyEvent>() {
+                self.handle_compose_key(key, ctx);
+                return EventPropagation::Stop;
+            }
+            // Eat mouse events too when compose is open
+            if event.downcast_ref::<MouseEvent>().is_some() {
+                return EventPropagation::Stop;
             }
             return EventPropagation::Stop;
         }
@@ -651,390 +976,17 @@ impl Widget for MonitorScreen {
         };
         buf.set_string(area.x, footer_y, &clip(&footer_text, w), footer_style);
 
+        // Draw compose overlay if open (before dropping borrows)
+        if self.compose.borrow().is_some() {
+            self.render_compose(area, buf);
+        }
+
         drop(workers);
         drop(messages);
         drop(error);
     }
 }
 
-// ── ComposeModal ──────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq)]
-enum ComposeField { Recipients, Message }
-
-struct ComposeModal {
-    server: String,
-    instance_id: String,
-    token: Option<String>,
-    /// Other workers (self excluded)
-    workers: Vec<WorkerInfo>,
-    /// Checked state per worker
-    selected: RefCell<Vec<bool>>,
-    /// Cursor within recipient list
-    list_cursor: Cell<usize>,
-    /// Scroll offset for recipient list
-    list_scroll: Cell<usize>,
-    /// Which field is focused
-    focused: Cell<ComposeField>,
-    /// The message being typed
-    message: RefCell<String>,
-    /// Optional hash to attach as reply ref
-    reply_hash: Option<String>,
-    own_id: Cell<Option<WidgetId>>,
-    sending: Cell<bool>,
-    error: RefCell<Option<String>>,
-    /// How many visible rows the recipient list has (updated each render)
-    list_visible_rows: Cell<usize>,
-}
-
-impl ComposeModal {
-    fn new(
-        server: String,
-        instance_id: String,
-        token: Option<String>,
-        workers: Vec<WorkerInfo>,
-        selected: Vec<bool>,
-        reply_hash: Option<String>,
-    ) -> Self {
-        Self {
-            server,
-            instance_id,
-            token,
-            workers,
-            selected: RefCell::new(selected),
-            list_cursor: Cell::new(0),
-            list_scroll: Cell::new(0),
-            focused: Cell::new(ComposeField::Recipients),
-            message: RefCell::new(String::new()),
-            reply_hash,
-            own_id: Cell::new(None),
-            sending: Cell::new(false),
-            error: RefCell::new(None),
-            list_visible_rows: Cell::new(4),
-        }
-    }
-
-    fn clamp_list_scroll(&self) {
-        let cursor = self.list_cursor.get();
-        let scroll = self.list_scroll.get();
-        let visible = self.list_visible_rows.get().max(1);
-        if cursor < scroll {
-            self.list_scroll.set(cursor);
-        } else if cursor >= scroll + visible {
-            self.list_scroll.set(cursor + 1 - visible);
-        }
-    }
-
-    fn do_send(&self, ctx: &AppContext) {
-        let message = self.message.borrow().trim().to_string();
-        if message.is_empty() {
-            *self.error.borrow_mut() = Some("Message cannot be empty".to_string());
-            return;
-        }
-        let selected = self.selected.borrow();
-        let recipients: Vec<String> = self.workers.iter().enumerate()
-            .filter(|(i, _)| selected.get(*i).copied().unwrap_or(false))
-            .map(|(_, w)| w.instance_id.clone())
-            .collect();
-        drop(selected);
-        if recipients.is_empty() {
-            *self.error.borrow_mut() = Some("Select at least one recipient".to_string());
-            return;
-        }
-        let Some(id) = self.own_id.get() else { return };
-        self.sending.set(true);
-        *self.error.borrow_mut() = None;
-
-        // Persist the first recipient as last_compose_recipient
-        let mut state = load_read_state();
-        state.last_compose_recipient.insert(self.instance_id.clone(), recipients[0].clone());
-        save_read_state(&state);
-
-        let server = self.server.clone();
-        let instance_id = self.instance_id.clone();
-        let token = self.token.clone();
-        let reply_hash = self.reply_hash.clone();
-        ctx.run_worker(id, send_to_all(server, instance_id, token, recipients, message, reply_hash));
-    }
-}
-
-static COMPOSE_BINDINGS: &[KeyBinding] = &[
-    KeyBinding {
-        key: KeyCode::Esc,
-        modifiers: KeyModifiers::NONE,
-        action: "close",
-        description: "Cancel",
-        show: true,
-    },
-    KeyBinding {
-        key: KeyCode::Tab,
-        modifiers: KeyModifiers::NONE,
-        action: "tab",
-        description: "Switch field",
-        show: true,
-    },
-    KeyBinding {
-        key: KeyCode::Enter,
-        modifiers: KeyModifiers::NONE,
-        action: "enter",
-        description: "Send",
-        show: true,
-    },
-    KeyBinding {
-        key: KeyCode::Up,
-        modifiers: KeyModifiers::NONE,
-        action: "list_up",
-        description: "Up",
-        show: false,
-    },
-    KeyBinding {
-        key: KeyCode::Char('k'),
-        modifiers: KeyModifiers::NONE,
-        action: "list_up",
-        description: "Up",
-        show: false,
-    },
-    KeyBinding {
-        key: KeyCode::Down,
-        modifiers: KeyModifiers::NONE,
-        action: "list_down",
-        description: "Down",
-        show: false,
-    },
-    KeyBinding {
-        key: KeyCode::Char('j'),
-        modifiers: KeyModifiers::NONE,
-        action: "list_down",
-        description: "Down",
-        show: false,
-    },
-    KeyBinding {
-        key: KeyCode::Char(' '),
-        modifiers: KeyModifiers::NONE,
-        action: "toggle",
-        description: "Toggle",
-        show: true,
-    },
-    KeyBinding {
-        key: KeyCode::Char('a'),
-        modifiers: KeyModifiers::NONE,
-        action: "select_all",
-        description: "All",
-        show: true,
-    },
-];
-
-impl Widget for ComposeModal {
-    fn widget_type_name(&self) -> &'static str { "ComposeModal" }
-    fn can_focus(&self) -> bool { true }
-    fn on_mount(&self, id: WidgetId) { self.own_id.set(Some(id)); }
-    fn on_unmount(&self, _: WidgetId) { self.own_id.set(None); }
-    fn key_bindings(&self) -> &[KeyBinding] { COMPOSE_BINDINGS }
-
-    fn on_action(&self, action: &str, ctx: &AppContext) {
-        if self.sending.get() { return; }
-        match action {
-            "close" => ctx.pop_screen_deferred(),
-            "tab" => {
-                self.focused.set(match self.focused.get() {
-                    ComposeField::Recipients => ComposeField::Message,
-                    ComposeField::Message => ComposeField::Recipients,
-                });
-            }
-            "enter" => {
-                match self.focused.get() {
-                    ComposeField::Recipients => self.focused.set(ComposeField::Message),
-                    ComposeField::Message => self.do_send(ctx),
-                }
-            }
-            "list_up" if self.focused.get() == ComposeField::Recipients => {
-                let cur = self.list_cursor.get();
-                if cur > 0 { self.list_cursor.set(cur - 1); }
-            }
-            "list_down" if self.focused.get() == ComposeField::Recipients => {
-                let len = self.workers.len();
-                let cur = self.list_cursor.get();
-                if cur + 1 < len { self.list_cursor.set(cur + 1); }
-            }
-            "toggle" if self.focused.get() == ComposeField::Recipients => {
-                let cur = self.list_cursor.get();
-                let mut sel = self.selected.borrow_mut();
-                if let Some(v) = sel.get_mut(cur) { *v = !*v; }
-            }
-            "select_all" if self.focused.get() == ComposeField::Recipients => {
-                let mut sel = self.selected.borrow_mut();
-                let any_unchecked = sel.iter().any(|&v| !v);
-                for v in sel.iter_mut() { *v = any_unchecked; }
-            }
-            _ => {}
-        }
-    }
-
-    fn on_event(&self, event: &dyn std::any::Any, ctx: &AppContext) -> EventPropagation {
-        // Send result
-        if let Some(result) = event.downcast_ref::<WorkerResult<SendResult>>() {
-            self.sending.set(false);
-            match &result.value {
-                Ok(_) => ctx.pop_screen_deferred(),
-                Err(e) => *self.error.borrow_mut() = Some(e.clone()),
-            }
-            return EventPropagation::Stop;
-        }
-
-        // Raw key events for text input in message field
-        if let Some(key) = event.downcast_ref::<KeyEvent>() {
-            if self.sending.get() { return EventPropagation::Stop; }
-            if self.focused.get() == ComposeField::Message {
-                match key.code {
-                    KeyCode::Char(c) => {
-                        self.message.borrow_mut().push(c);
-                        return EventPropagation::Stop;
-                    }
-                    KeyCode::Backspace => {
-                        self.message.borrow_mut().pop();
-                        return EventPropagation::Stop;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        EventPropagation::Continue
-    }
-
-    fn render(&self, _ctx: &AppContext, area: Rect, buf: &mut Buffer) {
-        if area.width < 30 || area.height < 10 { return; }
-
-        // Dim background
-        for y in area.y..area.y + area.height {
-            for x in area.x..area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_bg(Color::Rgb(5, 5, 15));
-                    cell.set_fg(Color::DarkGray);
-                }
-            }
-        }
-
-        let n_workers = self.workers.len();
-        // dialog height: title(1) + pad(1) + list_header(1) + list rows + pad(1) + msg_label(1) + msg_row(1) + error(1) + footer(1)
-        let list_rows = n_workers.min(6);
-        let dlg_h = (8 + list_rows as u16).min(area.height.saturating_sub(2));
-        let dlg_w = ((area.width as usize * 8 / 10) as u16).min(90).max(50);
-        let dlg_x = area.x + area.width.saturating_sub(dlg_w) / 2;
-        let dlg_y = area.y + area.height.saturating_sub(dlg_h) / 2;
-
-        let bg_style = Style::default().bg(Color::Rgb(15, 15, 30)).fg(Color::White);
-        for y in dlg_y..dlg_y + dlg_h {
-            fill_line(buf, dlg_x, y, dlg_w, bg_style);
-        }
-
-        let sending = self.sending.get();
-        let border_col = if sending { Color::Yellow } else { Color::Cyan };
-        draw_box(buf, dlg_x, dlg_y, dlg_w, dlg_h, border_col);
-
-        let title = if sending { " Sending… " }
-                    else if self.reply_hash.is_some() { " Reply " }
-                    else { " New Message " };
-        let title_x = dlg_x + dlg_w.saturating_sub(title.len() as u16) / 2;
-        buf.set_string(title_x, dlg_y, title,
-            Style::default().fg(Color::Black).bg(border_col).add_modifier(Modifier::BOLD));
-
-        let dim = Style::default().fg(Color::DarkGray);
-        let inner_x = dlg_x + 2;
-        let inner_w = dlg_w.saturating_sub(4) as usize;
-        let mut y = dlg_y + 2;
-        let max_y = dlg_y + dlg_h - 1;
-
-        // ── Recipient list ─────────────────────────────────────────────────────
-        let list_focused = self.focused.get() == ComposeField::Recipients;
-        let lc = least_capacitated(&self.workers, &self.instance_id);
-        let lbl_style = if list_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        } else { dim };
-        let selected_count = self.selected.borrow().iter().filter(|&&v| v).count();
-        let rcpt_label = format!("Recipients: {}/{} selected  (Space toggle, a all/none)", selected_count, n_workers);
-        if y < max_y { buf.set_string(inner_x, y, &clip(&rcpt_label, inner_w), lbl_style); y += 1; }
-
-        let cursor = self.list_cursor.get();
-        // Compute visible rows for this render
-        let available_list = (max_y.saturating_sub(y + 4)) as usize; // leave room for msg+footer
-        let visible = available_list.min(n_workers).max(1);
-        self.list_visible_rows.set(visible);
-        self.clamp_list_scroll();
-        let scroll = self.list_scroll.get();
-
-        let sel = self.selected.borrow();
-        for row in 0..visible {
-            let idx = scroll + row;
-            if idx >= n_workers { break; }
-            if y >= max_y { break; }
-            let worker = &self.workers[idx];
-            let checked = sel.get(idx).copied().unwrap_or(false);
-            let is_cursor = list_focused && idx == cursor;
-            let star = if Some(worker.instance_id.as_str()) == lc { " ★" } else { "" };
-            let check = if checked { "✓" } else { " " };
-            let scroll_marker = if idx == scroll && scroll > 0 { "↑" }
-                                 else if idx == scroll + visible - 1 && scroll + visible < n_workers { "↓" }
-                                 else { " " };
-            let row_text = format!(" [{}]{} @{}{}", check, scroll_marker, worker.instance_id, star);
-            let row_style = if is_cursor {
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else if checked {
-                Style::default().fg(Color::Green)
-            } else {
-                dim
-            };
-            if is_cursor {
-                fill_line(buf, inner_x, y, inner_w as u16, row_style);
-            }
-            buf.set_string(inner_x, y, &clip(&row_text, inner_w), row_style);
-            y += 1;
-        }
-        drop(sel);
-
-        y += 1; // spacing
-
-        // ── Message field ──────────────────────────────────────────────────────
-        let msg_focused = self.focused.get() == ComposeField::Message;
-        let msg_lbl_style = if msg_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        } else { dim };
-        if y < max_y {
-            buf.set_string(inner_x, y, "Message:", msg_lbl_style);
-            y += 1;
-        }
-        if y < max_y {
-            let msg = self.message.borrow();
-            let field_w = inner_w;
-            let display = if msg_focused {
-                let s = tail_chars(&msg, field_w.saturating_sub(1));
-                format!("{}|", s)
-            } else {
-                tail_chars(&msg, field_w)
-            };
-            let msg_bg = if msg_focused {
-                Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 50))
-            } else {
-                Style::default().fg(Color::White)
-            };
-            fill_line(buf, inner_x, y, inner_w as u16, msg_bg);
-            buf.set_string(inner_x, y, &display, msg_bg);
-        }
-
-        // ── Error line ─────────────────────────────────────────────────────────
-        if let Some(ref e) = *self.error.borrow() {
-            let ey = dlg_y + dlg_h - 3;
-            if ey > dlg_y + 2 {
-                put(buf, inner_x, ey, e, inner_w, Style::default().fg(Color::Red));
-            }
-        }
-
-        // ── Footer ─────────────────────────────────────────────────────────────
-        let hint = " [Tab] Switch  [↑↓] Navigate  [Space] Toggle  [Enter] Send  [Esc] Cancel ";
-        let hint_x = dlg_x + dlg_w.saturating_sub(hint.len() as u16) / 2;
-        buf.set_string(hint_x, dlg_y + dlg_h - 1, &clip(hint, dlg_w as usize), dim);
-    }
-}
 
 // ── MessageModal ──────────────────────────────────────────────────────────────
 
