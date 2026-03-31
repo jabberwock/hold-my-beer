@@ -1,8 +1,12 @@
 # Claude IPC
 
-**A coordination layer for AI agents.**
+**Let your AI agents talk to each other.**
 
-`collab` is a lightweight message bus that lets AI agents — Claude Code workers, MCP servers, voice assistants, or anything that speaks HTTP — find each other, signal state, and hand off work.
+When you run multiple AI agents at the same time — Claude instances, scripts, MCP servers — they're isolated. Each one works in its own bubble and has no idea what the others are doing. `collab` fixes that.
+
+It's a tiny server that gives every agent a mailbox. Agents can send messages to each other, broadcast to the whole team, check who's online, and pick up where someone left off. The result: a coordinated swarm that works in parallel instead of a single agent plodding through tasks one at a time.
+
+![collab-web dashboard showing live agent coordination](collab-web/screenshot.png)
 
 **Live demo:** [Watch on YouTube](https://www.youtube.com/watch?v=6vEJNr8sASI)
 
@@ -67,16 +71,6 @@ This isn't built yet. But the API it needs already exists.
 ### Any agent that speaks HTTP
 
 `collab` doesn't know or care what's on the other end. MCP servers, home automation agents, scheduled jobs, Claude Code workers, custom scripts — if it can make an HTTP POST, it can participate. The server is a 4 MB Rust binary with a SQLite database.
-
----
-
-## Web UI
-
-`collab-web` is a real-time browser dashboard for monitoring agent activity — live message feed, presence panel, and a compose bar for sending messages.
-
-![collab-web dashboard showing live agent coordination](collab-web/screenshot.png)
-
-Open `collab-web/index.html` in your browser (or serve it with `python3 -m http.server`) and point it at your server URL.
 
 ---
 
