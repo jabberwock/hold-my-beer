@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>collab — worker dashboard</title>
+  <meta name="description" content="Real-time messaging dashboard for AI agent coordination — monitor workers, send messages, and manage your agent swarm.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -24,6 +25,7 @@
       --text:    #dde4f0;
       --sub:     #8896b3;
       --dim:     #3d4f6e;
+      --dim-text: #7289a8;
       --online:  #22c55e;
       --offline: #3d4f6e;
       --danger:  #ef4444;
@@ -53,7 +55,7 @@
     .ch-badge { font-size: 15px; font-weight: 600; color: var(--sub); flex-shrink: 0; }
     .ch-badge span { color: var(--dim); }
     .server-row { display: flex; align-items: center; gap: 6px; }
-    .server-row label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+    .server-row label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--dim-text); }
     #server-url {
       font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: var(--sub);
       background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
@@ -63,7 +65,7 @@
     #server-url:focus { border-color: #22d3ee; color: var(--text); outline: none; }
     .import-btn {
       display: flex; align-items: center; gap: 4px; padding: 3px 9px;
-      font-size: 15px; font-weight: 600; color: var(--dim);
+      font-size: 15px; font-weight: 600; color: var(--dim-text);
       background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
       transition: color var(--t), border-color var(--t);
     }
@@ -73,7 +75,7 @@
     .conn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--offline); transition: background var(--t), box-shadow var(--t); }
     .conn[data-state="ok"]  .conn-dot { background: var(--online); box-shadow: 0 0 6px var(--online); animation: pulse 2.5s ease-in-out infinite; }
     .conn[data-state="err"] .conn-dot { background: var(--danger); }
-    .conn-label { font-size: 12px; font-weight: 600; color: var(--dim); transition: color var(--t); }
+    .conn-label { font-size: 12px; font-weight: 600; color: var(--dim-text); transition: color var(--t); }
     .conn[data-state="ok"]  .conn-label { color: var(--online); }
     .conn[data-state="err"] .conn-label { color: var(--danger); }
     @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.8)} }
@@ -90,11 +92,13 @@
     }
     .feed-title { font-size: 16px; font-weight: 700; }
     .feed-title span { color: var(--dim); }
-    .feed-desc { font-size: 14px; color: var(--dim); }
+    .feed-desc { font-size: 14px; color: var(--dim-text); }
     .msg-pill {
-      margin-left: auto; font-size: 12px; font-weight: 600; color: var(--dim);
+      margin-left: auto; font-size: 12px; font-weight: 600; color: var(--dim-text);
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 10px; padding: 2px 8px;
+    }
+    #last-updated { color: var(--dim-text); opacity: .75;
     }
 
     .feed { flex: 1; overflow-y: auto; padding: 12px 0 8px; }
@@ -119,9 +123,9 @@
     .msg-body { flex: 1; min-width: 0; padding-top: 1px; }
     .msg-meta { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; flex-wrap: wrap; }
     .msg-author { font-size: 15px; font-weight: 700; }
-    .msg-to { font-size: 15px; color: var(--dim); }
-    .msg-time { font-size: 15px; color: var(--dim); }
-    .msg-hash { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--dim); }
+    .msg-to { font-size: 15px; color: var(--dim-text); }
+    .msg-time { font-size: 15px; color: var(--dim-text); }
+    .msg-hash { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--dim-text); }
     .msg-text { font-size: 15px; line-height: 1.6; color: var(--text); word-break: break-word; white-space: pre-wrap; }
 
     .feed-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 80%; gap: 8px; color: var(--dim); font-size: 15px; }
@@ -334,7 +338,7 @@
   </div>
 </div>
 
-<div class="layout">
+<main class="layout">
 
   <!-- Feed -->
   <div class="feed-wrap">
@@ -342,7 +346,7 @@
       <span class="feed-title"><span aria-hidden="true">#</span>general</span>
       <span class="feed-desc">All worker messages</span>
       <span class="msg-pill" id="msg-count" aria-live="polite">0 messages</span>
-      <span class="msg-pill" id="last-updated" style="opacity:.5" aria-live="polite"></span>
+      <span class="msg-pill" id="last-updated" aria-live="polite"></span>
     </div>
     <div class="feed" id="feed" role="log" aria-live="polite" aria-label="Message feed"></div>
     <div class="feed-empty" id="feed-empty">
@@ -371,16 +375,16 @@
     <div class="members-heading">Members <span id="mem-total" aria-live="polite"></span></div>
     <div class="mem-section" id="sec-online" hidden>
       <div class="mem-section-lbl">Online</div>
-      <div id="list-online"></div>
+      <div id="list-online" role="list"></div>
     </div>
     <div class="mem-section" id="sec-offline" hidden>
       <div class="mem-section-lbl">Offline — <span id="offline-count"></span></div>
-      <div id="list-offline"></div>
+      <div id="list-offline" role="list"></div>
     </div>
     <p class="members-empty" id="mem-empty">No workers yet</p>
   </aside>
 
-</div>
+</main>
 
 <div id="sr-live" class="sr-only" aria-live="assertive" aria-atomic="false"></div>
 
