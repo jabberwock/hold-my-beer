@@ -280,12 +280,13 @@ Add to your project's `CLAUDE.md` so each worker starts coordinated automaticall
 At the start of every session:
 1. Run `collab status` — unread messages + roster. Treat pending messages as blocking.
 2. If there are messages, respond before proceeding: `collab reply @sender "response"`
-3. Run `collab stream --role "<project>: <your current task>"`
-   Example: `collab stream --role "yubitui: phase 09 OathScreen implementation"`
-   Prefer `stream` over `watch` — it uses SSE for instant delivery with zero idle polling cost.
-   Your role is saved and reused if you restart without --role.
+3. Set up a recurring poll: `/loop 1m collab list` (Claude Code CronCreate) or equivalent.
+   This is what actually wakes your session when messages arrive — Claude only processes
+   what gets injected as a prompt, and the cron loop does that.
+4. Optionally run `collab stream --role "<project>: <your current task>"` for the web
+   dashboard and for human operators watching a terminal. Stream does NOT wake Claude up.
 
-When your focus changes, restart watch with an updated --role.
+When your focus changes, update your role: `collab stream --role "<new role>"`
 
 Signal other agents when (and only when):
 - A public API changed they depend on
