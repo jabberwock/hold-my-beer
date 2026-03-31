@@ -99,25 +99,24 @@
       border-radius: 10px; padding: 2px 8px;
     }
     #last-updated { color: var(--dim-text); opacity: .75; }
-    /* Inbox filter button */
-    #inbox-btn {
-      font-size: 12px; font-weight: 600; color: var(--dim-text);
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 10px; padding: 2px 8px; cursor: pointer; flex-shrink: 0;
-      display: flex; align-items: center; gap: 5px;
-      transition: color var(--t), border-color var(--t), background var(--t);
+    /* Feed tabs */
+    .feed-tabs { display: flex; gap: 2px; margin-right: 4px; }
+    .feed-tab {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer;
+      font-size: 13px; font-weight: 600; color: var(--dim-text);
+      background: none; transition: color var(--t), background var(--t);
+      white-space: nowrap;
     }
-    #inbox-btn:hover { color: var(--sub); border-color: var(--bhi); }
-    #inbox-btn[aria-pressed="true"] { color: #22d3ee; border-color: rgba(34,211,238,.4); background: rgba(34,211,238,.08); }
-    .inbox-badge {
+    .feed-tab:hover { color: var(--text); background: rgba(255,255,255,.06); }
+    .feed-tab.active { color: var(--text); background: rgba(255,255,255,.08); box-shadow: inset 0 -2px 0 #22d3ee; }
+    .tab-badge {
       display: inline-flex; align-items: center; justify-content: center;
-      min-width: 16px; height: 16px; border-radius: 8px; padding: 0 3px;
+      min-width: 17px; height: 17px; border-radius: 9px; padding: 0 4px;
       font-size: 10px; font-weight: 800; line-height: 1;
       background: var(--danger); color: #fff;
-      transition: background var(--t);
     }
-    #inbox-btn[aria-pressed="true"] .inbox-badge { background: #22d3ee; color: #080c18; }
-    .inbox-badge[data-n="0"] { background: var(--sur2); color: var(--dim); }
+    .tab-badge:empty { display: none; }
     /* Reply button on message rows */
     .msg-reply-btn {
       display: none; align-items: center; justify-content: center;
@@ -419,9 +418,10 @@
     <div class="feed-header">
       <span class="feed-title" id="feed-title"><span aria-hidden="true">#</span>general</span>
       <span class="feed-desc" id="feed-desc">All worker messages</span>
-      <button id="inbox-btn" aria-pressed="false" title="Show messages addressed to you">
-        Inbox <span class="inbox-badge" id="inbox-badge" data-n="0">0</span>
-      </button>
+      <div class="feed-tabs" role="tablist">
+        <button class="feed-tab active" id="tab-all" role="tab" aria-selected="true">All</button>
+        <button class="feed-tab" id="tab-mentions" role="tab" aria-selected="false">@mentions <span class="tab-badge" id="inbox-badge"></span></button>
+      </div>
       <span class="msg-pill" id="msg-count" aria-live="polite">0 messages</span>
       <span class="msg-pill" id="last-updated" aria-live="polite"></span>
     </div>
@@ -979,19 +979,17 @@ function renderFeed() {
   const me    = document.getElementById('compose-name').value.trim();
   const all   = getAllMsgs();
 
-  // Update inbox badge
-  const n = unrepliedSenderCount(me, all);
+  // Update @mentions badge with count of messages addressed to me
+  const mentionCount = me ? all.filter(m => m.recipient === me).length : 0;
   const badge = document.getElementById('inbox-badge');
-  badge.textContent = n;
-  badge.dataset.n = n;
+  badge.textContent = mentionCount || '';
 
-  let msgs = S.inboxMode ? all.filter(m => m.recipient === me) : all;
+  let msgs = S.inboxMode ? all.filter(m => m.recipient === me || m.recipient === 'all') : all;
 
-  // Update feed header labels
   document.getElementById('feed-title').innerHTML =
-    S.inboxMode ? `<span aria-hidden="true">📬</span> Inbox` : `<span aria-hidden="true">#</span>general`;
+    S.inboxMode ? `<span aria-hidden="true">@</span>mentions` : `<span aria-hidden="true">#</span>general`;
   document.getElementById('feed-desc').textContent =
-    S.inboxMode ? (me ? `Messages to @${me}` : 'Messages to you') : 'All worker messages';
+    S.inboxMode ? (me ? `Messages to @${me}` : 'Set your name to filter mentions') : 'All worker messages';
 
   document.getElementById('msg-count').textContent = `${msgs.length} message${msgs.length===1?'':'s'}`;
   if (!msgs.length) { empty.hidden = false; feed.innerHTML = ''; return; }
@@ -1712,12 +1710,17 @@ document.getElementById('feed').addEventListener('click', e => {
   if (img) window.open(img.src, '_blank');
 });
 
-document.getElementById('inbox-btn').addEventListener('click', () => {
-  S.inboxMode = !S.inboxMode;
-  document.getElementById('inbox-btn').setAttribute('aria-pressed', String(S.inboxMode));
-  document.getElementById('feed').dataset.count = 0; // force full re-render
+function switchTab(toMentions) {
+  S.inboxMode = toMentions;
+  document.getElementById('tab-all').classList.toggle('active', !toMentions);
+  document.getElementById('tab-all').setAttribute('aria-selected', String(!toMentions));
+  document.getElementById('tab-mentions').classList.toggle('active', toMentions);
+  document.getElementById('tab-mentions').setAttribute('aria-selected', String(toMentions));
+  document.getElementById('feed').dataset.count = 0;
   renderFeed();
-});
+}
+document.getElementById('tab-all').addEventListener('click', () => switchTab(false));
+document.getElementById('tab-mentions').addEventListener('click', () => switchTab(true));
 
 // Re-compute inbox count when your name changes
 document.getElementById('compose-name').addEventListener('input', () => renderFeed());
