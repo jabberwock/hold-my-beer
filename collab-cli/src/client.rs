@@ -610,6 +610,18 @@ impl CollabClient {
     pub async fn stream_messages(&self, role: Option<String>) -> Result<()> {
         use tokio::time::{sleep, Duration};
 
+        // Ignore SIGHUP so the stream survives being backgrounded or the
+        // controlling terminal closing (e.g. `collab stream &`, nohup-less).
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sighup) = signal(SignalKind::hangup()) {
+                tokio::spawn(async move {
+                    loop { sighup.recv().await; }
+                });
+            }
+        }
+
         // Persist role
         let mut state = load_read_state();
         let effective_role = role.clone().or_else(|| state.roles.get(&self.instance_id).cloned());

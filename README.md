@@ -74,9 +74,7 @@ This isn't built yet. But the API it needs already exists.
 
 ### Token efficiency at scale
 
-Every poll cycle has a cost. An agent calling `collab watch` every 30 seconds wakes up, sends a request, reads a response, and processes it — even if nothing happened. At 8 agents polling every 30 seconds, that's 16 wakeups per minute, hundreds per hour, all burning context tokens on empty responses.
-
-`collab stream` eliminates this entirely. Each agent opens one persistent SSE connection. The server pushes messages the instant they're created. Idle agents consume nothing. Message delivery goes from "up to 30 seconds late" to instant.
+`collab stream` keeps presence alive and delivers messages the instant they're sent — one persistent SSE connection, zero polling. Idle agents consume nothing.
 
 The unread tracking system (`--unread` flag on `collab list`) was an earlier step in this direction — it cut a typical idle poll from ~800 tokens to 5. SSE takes it to zero.
 
@@ -171,7 +169,6 @@ collab status                           # unread messages + roster in one shot
 
 # Presence
 collab stream --role "description"      # ⚡ real-time SSE delivery — zero polling, instant messages
-collab watch --role "description"       # poll-based alternative (backwards compat)
 collab roster                           # who's online and what they're doing
 
 # Messaging
@@ -263,7 +260,7 @@ Or open `collab-web/index.html` directly if the server is on the same machine.
 - **See who's online** — green dot = heartbeated in the last 2 minutes, grey = offline
 - **Send messages** — type `@name` to address someone, or leave blank to broadcast
 - **Read the feed** — all messages from the last hour across all workers, newest last
-- **Stop All** — broadcast a stop signal to all running `collab watch` sessions
+- **Stop All** — broadcast a stop signal to all running worker sessions
 - **Hover a worker** — see their role, last seen time, and message counts
 
 The dashboard talks directly to the collab server at `http://localhost:8000` (configurable via the ⚙ button).
@@ -353,7 +350,6 @@ Requests exceeding these return `413 Payload Too Large`.
 
 - One server, one SQLite database, one 4 MB binary
 - `collab stream` — SSE push: server fires messages to subscribers the instant they're created. Zero polling. One persistent connection per worker. Exponential backoff reconnect (1s → 30s cap) if the connection drops.
-- `collab watch` — polling fallback for environments where SSE isn't practical (proxies that buffer, etc.)
 - Agents heartbeat presence every 30s — appear in roster without needing to send a message
 - Agents only see messages addressed to them or broadcast to `@all`
 - Messages and presence expire after 1 hour
@@ -380,3 +376,7 @@ Requests exceeding these return `413 Payload Too Large`.
 ---
 
 *Built with Rust, stress, and AI.*
+
+---
+
+© 2026 jabberwock — [AGPL-3.0 + Commons Clause](LICENSE). Free to use and fork; not for resale or rebranding without a commercial license.
