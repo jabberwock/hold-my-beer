@@ -1,20 +1,18 @@
-# Claude IPC
+# AI IPC
 
 **Let your AI agents talk to each other.**
 
-When you run multiple AI agents at the same time — Claude instances, scripts, MCP servers — they're isolated. Each one works in its own bubble and has no idea what the others are doing. `collab` fixes that.
+When you run multiple AI agents at the same time — Claude, GPT, Gemini, scripts, MCP servers — they're isolated. Each one works in its own bubble and has no idea what the others are doing. `collab` fixes that.
 
 It's a tiny server that gives every agent a mailbox. Agents can send messages to each other, broadcast to the whole team, check who's online, and pick up where someone left off. The result: a coordinated swarm that works in parallel instead of a single agent plodding through tasks one at a time.
 
 **Token-efficient by design.** Idle agents cost almost nothing. `collab stream` delivers messages instantly via SSE — no polling, zero empty responses, one persistent connection per worker. With 8 agents running, that eliminates hundreds of wasted context tokens per hour that would otherwise go to "no new messages" poll responses.
 
-![collab-web dashboard showing live agent coordination](collab-web/screenshot.png)
-
 ![collab-web with 10 active workers — ux-expert, builder, researcher, redteamer and more coordinating in real time](collab-web/screenshot2.png)
 
-[![Watch the demo](https://img.youtube.com/vi/ZJI3-WJNUB8/maxresdefault.jpg)](https://www.youtube.com/watch?v=ZJI3-WJNUB8)
+[![Watch the demo](https://img.youtube.com/vi/JJQKMES5zOY/maxresdefault.jpg)](https://www.youtube.com/watch?v=JJQKMES5zOY)
 
-**[▶ Watch the demo](https://www.youtube.com/watch?v=ZJI3-WJNUB8)** · [Earlier demo](https://www.youtube.com/watch?v=6vEJNr8sASI)
+**[▶ Watch the demo](https://www.youtube.com/watch?v=JJQKMES5zOY)**
 
 ---
 
@@ -22,7 +20,7 @@ It's a tiny server that gives every agent a mailbox. Agents can send messages to
 
 ### Parallel software development across platforms
 
-You're building a cross-platform app. Instead of one Claude instance doing everything sequentially, you run three — one on macOS writing code, one on Linux running the test suite, one on Windows checking build compatibility. They coordinate in real time:
+You're building a cross-platform app. Instead of one AI agent doing everything sequentially, you run three — one on macOS writing code, one on Linux running the test suite, one on Windows checking build compatibility. They coordinate in real time:
 
 ```
 @kali → @mac   "phase 12 confirmed — all wizard flows pass on Linux"
@@ -40,10 +38,10 @@ You're traveling. Your phone case cracked. You tell Siri on your watch: *"Print 
 
 What happens:
 
-1. **Siri** triggers a shortcut that calls a Claude agent via [blend-ai](https://github.com/yourusername/blend-ai)
-2. **Claude** looks up the model dimensions, finds the right STL, slices it for TPU
-3. **Claude** sends the print job via an MCP server to your Bambu Lab printer
-4. **collab** lets Claude signal back: *"Print queued, ~3h 20m, bed heating now"*
+1. **Siri** triggers a shortcut that calls an AI agent via [blend-ai](https://github.com/yourusername/blend-ai)
+2. **The agent** looks up the model dimensions, finds the right STL, slices it for TPU
+3. **The agent** sends the print job via an MCP server to your Bambu Lab printer
+4. **collab** lets the agent signal back: *"Print queued, ~3h 20m, bed heating now"*
 5. You land, case is ready
 
 The coordination glue between those steps — finding the right agent, handing off state, confirming completion — is exactly what `collab` handles.
@@ -381,4 +379,4 @@ Requests exceeding these return `413 Payload Too Large`.
 
 ---
 
-*Built with Rust, stress, and Claude.*
+*Built with Rust, stress, and AI.*
