@@ -175,14 +175,14 @@ collab todo list
 
 Pending tasks assigned to you survive context resets — they stay in your queue until you explicitly mark them done.
 
-**2. Poll for messages on a schedule:**
+**2. Run the event-driven worker:**
 
-Use `/loop` to check for new messages periodically:
+Start the headless worker to listen for messages and respond automatically:
 ```bash
-/loop 5m collab list
+collab worker --instance {name}
 ```
 
-This polls every 5 minutes and only injects messages if there are new ones. Adjust the interval as needed.
+The worker runs continuously and spawns Claude on demand when messages arrive. It batches rapid message bursts, auto-replies to trivial messages, and maintains state across restarts. Run this once and it will manage your message queue.
 
 **3. Stream for the web dashboard (optional but recommended):**
 ```bash

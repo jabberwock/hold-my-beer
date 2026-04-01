@@ -387,6 +387,7 @@ dependencies = [
  "crossterm",
  "libc",
  "ratatui",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

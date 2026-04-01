@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod client;
 mod init;
+mod worker;
 #[cfg(feature = "monitor")]
 mod monitor;
 #[cfg(feature = "monitor")]
@@ -260,6 +261,25 @@ enum Commands {
         #[arg(short, long, value_name = "DIR")]
         output: Option<String>,
     },
+
+    /// Event-driven headless worker (replaces polling)
+    Worker {
+        /// Project directory to run claude in (default: cwd)
+        #[arg(long, value_name = "PATH")]
+        workdir: Option<PathBuf>,
+
+        /// Model to pass to claude (default: haiku)
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+
+        /// Enable trivial message auto-reply (default: true)
+        #[arg(long)]
+        auto_reply: Option<bool>,
+
+        /// Wait this long (ms) after first message before spawning (default: 2000)
+        #[arg(long, value_name = "MS")]
+        batch_wait: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -270,14 +290,14 @@ async fn main() -> Result<()> {
     // Priority: CLI flag > env var > config file > default
     let server = cli.server
         .or_else(|| std::env::var("COLLAB_SERVER").ok())
-        .or(file_config.host)
+        .or(file_config.host.clone())
         .unwrap_or_else(|| "http://localhost:8000".to_string());
 
     let instance = cli.instance
         .or_else(|| std::env::var("COLLAB_INSTANCE").ok())
-        .or(file_config.instance);
+        .or(file_config.instance.clone());
 
-    let token = std::env::var("COLLAB_TOKEN").ok().or(file_config.token);
+    let token = std::env::var("COLLAB_TOKEN").ok().or(file_config.token.clone());
 
     let recipients = file_config.recipients;
 
@@ -303,6 +323,30 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        return Ok(());
+    }
+
+    if let Commands::Worker { workdir, model, auto_reply, batch_wait } = cli.command {
+        let workdir = workdir.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let model = model.unwrap_or_else(|| "haiku".to_string());
+        let auto_reply = auto_reply.unwrap_or(true);
+        let batch_wait = batch_wait.unwrap_or(2000);
+
+        let instance_id = instance.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Instance ID required. Set via --instance, $COLLAB_INSTANCE, or ~/.collab.toml"
+            )
+        })?;
+
+        let harness = worker::WorkerHarness::new(
+            CollabClient::new(&server, &instance_id, token.as_deref()),
+            instance_id,
+            workdir,
+            model,
+            auto_reply,
+            batch_wait,
+        );
+        harness.run().await?;
         return Ok(());
     }
 

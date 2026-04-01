@@ -162,10 +162,10 @@ pub struct Todo {
 
 #[derive(Clone)]
 pub struct CollabClient {
-    base_url: String,
-    instance_id: String,
-    token: Option<String>,
-    client: reqwest::Client,
+    pub base_url: String,
+    pub instance_id: String,
+    pub token: Option<String>,
+    pub client: reqwest::Client,
 }
 
 impl CollabClient {
