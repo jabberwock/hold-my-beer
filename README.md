@@ -48,7 +48,7 @@ You're traveling. Your phone case cracked. You tell Siri on your watch: *"Print 
 
 What happens:
 
-1. **Siri** triggers a shortcut that calls an AI agent via [blend-ai](https://github.com/yourusername/blend-ai)
+1. **Siri** triggers a shortcut that calls an AI agent via [blend-ai](https://github.com/jabberwock/blend-ai)
 2. **The agent** looks up the model dimensions, finds the right STL, slices it for TPU
 3. **The agent** sends the print job via an MCP server to your Bambu Lab printer
 4. **collab** lets the agent signal back: *"Print queued, ~3h 20m, bed heating now"*
