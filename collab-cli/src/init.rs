@@ -329,7 +329,11 @@ fn write_worker_manifest(project_root: &Path, output_dir: &Path, config: &Projec
         let worker_model = worker.model.as_ref().unwrap_or(&config.model).clone();
         let codebase_path = config.codebase_path.as_ref()
             .map(|p| p.clone())
-            .unwrap_or_else(|| "<codebase_path-not-configured>".to_string());
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string())
+            });
 
         manifest_entries.push(WorkerManifestEntry {
             name: worker.name.clone(),
