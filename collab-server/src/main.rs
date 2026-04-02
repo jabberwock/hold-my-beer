@@ -1,7 +1,44 @@
 use clap::Parser;
 use collab_server::{AppState, db};
 use std::sync::{Arc, atomic::AtomicUsize};
+use std::path::PathBuf;
 use std::time::Instant;
+
+/// Load .env file from cwd or parent directories.
+fn load_dotenv() {
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let mut dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    loop {
+        let candidate = dir.join(".env");
+        if candidate.is_file() {
+            if let Ok(contents) = std::fs::read_to_string(&candidate) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, val)) = line.split_once('=') {
+                        let key = key.trim();
+                        let val = val.trim().trim_matches('"').trim_matches('\'');
+                        if std::env::var(key).is_err() {
+                            std::env::set_var(key, val);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        if home.as_ref().map_or(false, |h| &dir == h) {
+            return;
+        }
+        if !dir.pop() {
+            return;
+        }
+    }
+}
 
 fn token_from_config() -> Option<String> {
     #[derive(serde::Deserialize, Default)]
@@ -30,6 +67,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    load_dotenv();
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
