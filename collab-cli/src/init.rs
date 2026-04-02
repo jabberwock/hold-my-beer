@@ -340,7 +340,15 @@ fn write_worker_manifest(project_root: &Path, output_dir: &Path, config: &Projec
             role: worker.role.clone(),
             codebase_path,
             model: worker_model,
-            output_dir: output_dir.join(&worker.name).to_string_lossy().to_string(),
+            output_dir: {
+                let base_str = output_dir.to_string_lossy();
+                let clean = base_str.strip_prefix("./").unwrap_or(&base_str);
+                let rel = Path::new(clean).join(&worker.name);
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&rel))
+                    .unwrap_or(rel)
+                    .to_string_lossy().to_string()
+            },
         });
     }
 

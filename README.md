@@ -35,7 +35,7 @@ Then run init:
 
 ```bash
 collab init workers.yaml
-# Creates: .collab/workers.json, ./workers/frontend/.env, ./workers/backend/.env
+# Creates: .collab/workers.json, ./workers/frontend/CLAUDE.md, ./workers/backend/CLAUDE.md
 ```
 
 ### 2. Start the server (keep running)
@@ -69,7 +69,7 @@ cd collab-web && ./run
 
 ![collab-web dashboard showing workers coordinating in real time](collab-web/screenshot.png)
 
-You'll see your workers appear on the roster. Messages stream in live — click a worker to message them, or broadcast to the whole team.
+You'll see your workers appear on the roster. Messages stream in live — type `@name` in the message field to DM a worker, or leave it blank to broadcast to everyone.
 
 **CLI-only alternative:** If you don't need the dashboard, you can stream messages in a terminal instead:
 
@@ -165,7 +165,7 @@ The old way to wire agents together was polling — `/loop 1m collab list` insid
 
 ### Any agent that speaks HTTP
 
-`collab` doesn't know or care what's on the other end. MCP servers, home automation agents, scheduled jobs, Claude Code workers, custom scripts — if it can make an HTTP POST, it can participate. The server is a 4 MB Rust binary with a SQLite database.
+`collab` doesn't know or care what's on the other end. MCP servers, home automation agents, scheduled jobs, Claude Code workers, custom scripts — if it can make an HTTP POST, it can participate. The server is a small Rust binary with a SQLite database.
 
 ---
 
@@ -231,7 +231,6 @@ Create `~/.collab.toml` (or `C:\Users\<you>\.collab.toml` on Windows):
 host = "http://your-server:8000"
 instance = "your-agent-name"
 token = "your-shared-secret"
-recipients = ["other-agent-1", "other-agent-2"]
 ```
 
 **`.env` file support** — drop a `.env` file anywhere in your project tree. Both `collab` and `collab-server` walk up from the current directory and load the first one they find. Values in `.env` won't overwrite variables already in your environment.
@@ -364,7 +363,7 @@ Or open `collab-web/index.html` directly if the server is on the same machine.
 - **Stop All** — broadcast a stop signal to all running worker sessions
 - **Hover a worker** — see their role, last seen time, and message counts
 
-The dashboard talks directly to the collab server at `http://localhost:8000` (configurable via the settings button).
+The dashboard talks directly to the collab server at `http://localhost:8000` (configurable via the server URL field in the top bar).
 
 ---
 
@@ -439,14 +438,14 @@ For most setups, prefer `collab worker` (headless harness) over live sessions �
 | Role | 256 chars |
 | Refs per message | 20 entries, 64 chars each |
 
-Requests exceeding these return `413 Payload Too Large`.
+Requests exceeding these return `400 Bad Request`.
 
 </details>
 
 <details>
 <summary><strong>How it works</strong></summary>
 
-- One server, one SQLite database, one 4 MB binary
+- One server, one SQLite database, one small Rust binary
 - `collab worker` — event-driven harness: SSE connection delivers messages instantly, spawns Claude only when there's work. Batches rapid message bursts. Auto-replies to trivial messages. Persists state across invocations.
 - `collab stream` — SSE push for live sessions and the web dashboard. One persistent connection per worker.
 - Agents heartbeat presence every 30s — appear in roster without needing to send a message

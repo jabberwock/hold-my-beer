@@ -553,7 +553,7 @@ async fn lifecycle_start(target: &str, server: &str, token: Option<&str>) -> Res
     }
 
     for worker in workers {
-        let workdir = std::path::PathBuf::from(&worker.codebase_path);
+        let workdir = std::path::PathBuf::from(&worker.output_dir);
         let child = lifecycle::spawn_worker(
             &worker.name,
             &workdir,
@@ -564,7 +564,7 @@ async fn lifecycle_start(target: &str, server: &str, token: Option<&str>) -> Res
         )?;
 
         let pid = child.id();
-        let cmd = format!("collab worker --workdir {} --model {}", worker.codebase_path, worker.model);
+        let cmd = format!("collab worker --workdir {} --model {}", worker.output_dir, worker.model);
         lifecycle::save_worker_pid(&pids_file, &worker.name, pid, &cmd)?;
 
         // Detach the child process
@@ -604,15 +604,6 @@ async fn lifecycle_stop(target: &str, server: &str, token: Option<&str>) -> Resu
     if workers_to_stop.is_empty() {
         println!("No matching running workers found");
         return Ok(());
-    }
-
-    // When stopping all, also broadcast the stop signal so any collab stream
-    // instances (not managed by lifecycle) also exit gracefully.
-    if targets[0] == "all" {
-        let client = CollabClient::new(server, "lifecycle", token);
-        if let Err(e) = client.stop_all().await {
-            eprintln!("Warning: could not broadcast stop signal: {}", e);
-        }
     }
 
     for name in &workers_to_stop {
