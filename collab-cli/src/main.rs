@@ -82,6 +82,44 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Load a .env file by walking up from cwd (same search as .collab.toml).
+/// Sets values as real environment variables so std::env::var picks them up.
+fn load_dotenv() {
+    let home = home_dir();
+    let mut dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    loop {
+        let candidate = dir.join(".env");
+        if candidate.is_file() {
+            if let Ok(contents) = std::fs::read_to_string(&candidate) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, val)) = line.split_once('=') {
+                        let key = key.trim();
+                        let val = val.trim().trim_matches('"').trim_matches('\'');
+                        // Don't overwrite values already in the environment
+                        if std::env::var(key).is_err() {
+                            std::env::set_var(key, val);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        if home.as_ref().map_or(false, |h| &dir == h) {
+            return;
+        }
+        if !dir.pop() {
+            return;
+        }
+    }
+}
+
 /// CLI for inter-instance communication between Claude Code workers
 #[derive(Parser)]
 #[command(name = "collab")]
@@ -309,10 +347,13 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (walk up from cwd, stop before home)
+    load_dotenv();
+
     let cli = Cli::parse();
     let file_config = load_config();
 
-    // Priority: CLI flag > env var > config file > default
+    // Priority: CLI flag > env var > .env file (already loaded) > config file > default
     let server = cli.server
         .or_else(|| std::env::var("COLLAB_SERVER").ok())
         .or(file_config.host.clone())
@@ -376,7 +417,7 @@ async fn main() -> Result<()> {
     }
 
     if let Commands::Start { target } = cli.command {
-        return lifecycle_start(&target).await;
+        return lifecycle_start(&target, &server, token.as_deref()).await;
     }
 
     if let Commands::Stop { target } = cli.command {
@@ -384,7 +425,7 @@ async fn main() -> Result<()> {
     }
 
     if let Commands::Restart { target } = cli.command {
-        return lifecycle_restart(&target).await;
+        return lifecycle_restart(&target, &server, token.as_deref()).await;
     }
 
     if matches!(cli.command, Commands::LifecycleStatus) {
@@ -519,7 +560,7 @@ fn parse_target(target: &str) -> Result<Vec<String>> {
     }
 }
 
-async fn lifecycle_start(target: &str) -> Result<()> {
+async fn lifecycle_start(target: &str, server: &str, token: Option<&str>) -> Result<()> {
     let targets = parse_target(target)?;
     let manifest_path = find_manifest()?;
     let manifest = lifecycle::read_manifest(&manifest_path)?;
@@ -541,39 +582,14 @@ async fn lifecycle_start(target: &str) -> Result<()> {
     }
 
     for worker in workers {
-        // Read env vars from manifest parent .collab.toml if needed
-        // For now, use env vars from environment
-        let token = std::env::var("COLLAB_TOKEN")
-            .or_else(|_| {
-                // Try to read from manifest dir if it exists
-                let manifest_dir = manifest_path.parent().unwrap();
-                if let Ok(content) = std::fs::read_to_string(manifest_dir.join(".collab.toml")) {
-                    // Parse token from TOML (simplified)
-                    content.lines()
-                        .find_map(|line| {
-                            if line.starts_with("token") {
-                                line.split('=').nth(1)
-                                    .map(|s| s.trim().trim_matches('"').to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .ok_or_else(|| anyhow::anyhow!("token not found"))
-                } else {
-                    Err(anyhow::anyhow!("COLLAB_TOKEN not set"))
-                }
-            })?;
-
-        let server = std::env::var("COLLAB_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string());
-
         let workdir = std::path::PathBuf::from(&worker.codebase_path);
         let child = lifecycle::spawn_worker(
             &worker.name,
             &workdir,
             &worker.model,
             &worker.name,
-            &server,
-            &token,
+            server,
+            token,
         )?;
 
         let pid = child.id();
@@ -630,10 +646,10 @@ async fn lifecycle_stop(target: &str) -> Result<()> {
     Ok(())
 }
 
-async fn lifecycle_restart(target: &str) -> Result<()> {
+async fn lifecycle_restart(target: &str, server: &str, token: Option<&str>) -> Result<()> {
     lifecycle_stop(target).await?;
     std::thread::sleep(std::time::Duration::from_millis(500));
-    lifecycle_start(target).await?;
+    lifecycle_start(target, server, token).await?;
     Ok(())
 }
 

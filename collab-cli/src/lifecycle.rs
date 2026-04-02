@@ -56,14 +56,15 @@ fn validate_workdir(path: &Path) -> Result<PathBuf> {
 fn build_worker_env(
     instance_name: &str,
     server: &str,
-    token: &str,
+    token: Option<&str>,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
 
-    // Whitelist: Only these three essential vars
     env.insert("COLLAB_INSTANCE".to_string(), instance_name.to_string());
     env.insert("COLLAB_SERVER".to_string(), server.to_string());
-    env.insert("COLLAB_TOKEN".to_string(), token.to_string());
+    if let Some(token) = token {
+        env.insert("COLLAB_TOKEN".to_string(), token.to_string());
+    }
 
     // Inherit PATH and HOME for shell execution (required for `collab` to find itself)
     if let Ok(path) = std::env::var("PATH") {
@@ -83,7 +84,7 @@ pub fn spawn_worker(
     model: &str,
     instance_name: &str,
     server: &str,
-    token: &str,
+    token: Option<&str>,
 ) -> Result<Child> {
     // Validate workdir
     let validated_workdir = validate_workdir(workdir)?;

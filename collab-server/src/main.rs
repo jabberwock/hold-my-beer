@@ -23,10 +23,6 @@ struct Args {
     #[arg(long, default_value = "8000", env = "COLLAB_PORT")]
     port: u16,
 
-    /// Shared secret token for authentication (if unset, auth is disabled)
-    #[arg(long, env = "COLLAB_TOKEN")]
-    token: Option<String>,
-
     /// Audit log mode — disables message deletion and stamps read_at on delivery
     #[arg(long, env = "COLLAB_AUDIT")]
     audit: bool,
@@ -40,11 +36,19 @@ async fn main() -> anyhow::Result<()> {
 
     let db = db::init_db().await?;
     let (tx, _) = tokio::sync::broadcast::channel(256);
-    // Priority: --token flag > COLLAB_TOKEN env > ~/.collab.toml
-    let token = args.token.clone().or_else(token_from_config);
+    // Priority: COLLAB_TOKEN env > ~/.collab.toml
+    let token = std::env::var("COLLAB_TOKEN").ok().or_else(token_from_config);
+    let token = token.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Token required. Set it via:\n\
+             1. COLLAB_TOKEN environment variable (or .env file)\n\
+             2. token = \"...\" in ~/.collab.toml"
+        )
+    })?;
+
     let state = AppState {
         db,
-        token: token.clone(),
+        token: Some(token.clone()),
         audit: args.audit,
         tx,
         sse_subscribers: Arc::new(AtomicUsize::new(0)),
@@ -55,11 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    if token.is_some() {
-        tracing::info!("Auth enabled — token required on all requests");
-    } else {
-        tracing::warn!("Auth disabled — set --token, COLLAB_TOKEN, or token in ~/.collab.toml");
-    }
+    tracing::info!("Auth enabled — token required on all requests");
     if args.audit {
         tracing::info!("Audit log mode enabled — messages retained indefinitely, read_at stamped on delivery");
     }
