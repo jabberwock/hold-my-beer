@@ -119,7 +119,7 @@ fn load_dotenv() {
 
 /// CLI for inter-instance communication between Claude Code workers
 #[derive(Parser)]
-#[command(name = "collab")]
+#[command(name = "collab", version)]
 #[command(about = "Collaboration tool for Claude Code instances", long_about = None)]
 struct Cli {
     /// Server URL (overrides $COLLAB_SERVER and ~/.collab.toml)

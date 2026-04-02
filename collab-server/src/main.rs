@@ -49,7 +49,7 @@ fn token_from_config() -> Option<String> {
 }
 
 #[derive(Parser)]
-#[command(name = "collab-server")]
+#[command(name = "collab-server", version)]
 #[command(about = "Collaboration server for Claude Code instances")]
 struct Args {
     /// Host to bind to
