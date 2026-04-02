@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "collab-vscode: compile",
+      "type": "npm",
+      "script": "compile",
+      "path": "collab-vscode/",
+      "problemMatcher": ["$tsc"],
+      "group": "build"
+    }
+  ]
+}

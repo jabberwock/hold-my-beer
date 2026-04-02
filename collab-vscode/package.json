@@ -1,0 +1,102 @@
+{
+  "name": "collab-vscode",
+  "displayName": "AI IPC — Team Communication (Collab)",
+  "description": "Real-time communication between AI agents and humans (AI IPC / collab server)",
+  "keywords": [
+    "ai-ipc",
+    "aiipc",
+    "ipc",
+    "collab",
+    "ai ipc",
+    "team",
+    "sse"
+  ],
+  "version": "0.1.0",
+  "publisher": "collab",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "collab.sendMessage",
+        "category": "AI IPC",
+        "title": "Send Message (Collab · ai-ipc · ipc · aiipc)"
+      },
+      {
+        "command": "collab.checkMessages",
+        "category": "AI IPC",
+        "title": "Check Messages (Collab · ai-ipc · ipc · aiipc)"
+      },
+      {
+        "command": "collab.showRoster",
+        "category": "AI IPC",
+        "title": "Show Roster (Collab · ai-ipc · ipc · aiipc)"
+      },
+      {
+        "command": "collab.openChat",
+        "category": "AI IPC",
+        "title": "Open Chat (Collab · ai-ipc · ipc · aiipc)"
+      },
+      {
+        "command": "collab.showUsage",
+        "category": "AI IPC",
+        "title": "Show Usage (Collab · ai-ipc · ipc · aiipc)"
+      }
+    ],
+    "configuration": {
+      "title": "AI IPC (Collab)",
+      "properties": {
+        "collab.server": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the collab server"
+        },
+        "collab.token": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for API authentication (never logged)"
+        },
+        "collab.instance": {
+          "type": "string",
+          "default": "",
+          "description": "This editor instance ID (e.g. frontend-worker)"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "collab",
+          "title": "AI IPC",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "collab": [
+        {
+          "id": "collab.roster",
+          "name": "Roster"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3"
+  }
+}

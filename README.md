@@ -1,12 +1,21 @@
 # AI IPC
 
-**Let your AI agents talk to each other.**
+[![CI](https://github.com/jabberwock/claude-ipc/actions/workflows/rust.yml/badge.svg)](https://github.com/jabberwock/claude-ipc/actions "GitHub Actions")
+[![License](https://img.shields.io/badge/License-AGPL--3.0%20%2B%20Commons%20Clause-30363D?style=flat&labelColor=1e3a5f)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![YouTube — demo](https://img.shields.io/badge/YouTube-Watch%20demo-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=JJQKMES5zOY)
 
-When you run multiple AI agents at the same time — Claude, GPT, Gemini, scripts, MCP servers — they're isolated. Each one works in its own bubble and has no idea what the others are doing. `collab` fixes that.
+**What if your AIs and automations could run a whole outcome together — not just answer one chat at a time?**
 
-It's a tiny server that gives every agent a mailbox. Agents can send messages, assign tasks, check who's online, and hand off work to the next agent in the pipeline. The result: a coordinated team that works in parallel instead of a single agent plodding through tasks one at a time.
+Smart tools are everywhere, but most still work in **silos**: one drafts a document, another checks inventory, a third talks to a vendor. They don’t fail because they’re stupid; they fail because **nobody hands off the baton**. There’s no shared “team room” where work, status, and responsibility actually live.
 
-**Zero idle cost.** The `collab worker` harness holds a persistent SSE connection and only spawns an AI when a message arrives. No polling, no wasted tokens. You only pay for real work.
+Picture something ambitious — purely as an example: you describe a jet engine as a 3D design, and a chain of people, AIs, and suppliers turns that into **real parts at your warehouse a month later**. This software doesn’t pick manufacturers or promise dates. What it *does* is give that chain a **common switchboard**: who said what, what’s next, who’s on duty, and what’s still open — so the plan doesn’t die because something never got the message.
+
+**AI IPC** is that idea in a box: **messages, tasks, who’s online, and broadcasts** — the same coordination primitives you’d want for a human team, for any mix of assistants and scripts you choose to plug in. The ceiling is what you connect; the floor is “things can finally talk to each other on purpose.”
+
+*If you’re not technical:* you don’t need to know how it’s built — think **shared project line for machines**, not a single smarter chatbot. *If you are:* the server and CLI are named **`collab`**, there’s a web dashboard, editor hooks, and the usual APIs — all spelled out below.
+
+**Zero idle cost** means the expensive parts only wake up **when there’s real work** — not spinning in empty loops. That’s the architecture, in one sentence for everyone.
 
 ![collab-web with 10 active workers — ux-expert, builder, researcher, redteamer and more coordinating in real time](collab-web/screenshot2.png)
 
@@ -71,27 +80,33 @@ collab stream --role "Building login UI"
 
 ---
 
-## What does it cost?
+<details>
+<summary><strong>What does it cost?</strong></summary>
 
-Real numbers from a live 8-worker team building a Diablo 4 app:
+Real numbers from a live 9-worker team building a Diablo 4 app:
 
 ```
-$ collab usage
+collab usage
+Token usage (estimated ~4 chars/token)
 
-Worker                  Input   Output  Calls   Time
-────────────────────────────────────────────────────
-project-manager          102K      41K    113  1874s
-validator                 98K      26K     93  1785s
-researcher                62K      19K     58  1710s
-database                  51K      17K     49  1906s
-builder                    2K       1K      3   391s
-────────────────────────────────────────────────────
-TOTAL                    360K     125K    380 11459s
+Worker                  Input   Output  Calls     Time  Model
+─────────────────────────────────────────────────────────────────
+project-manager          172K      74K    204    51:20  haiku
+validator                136K      39K    144    43:58  haiku
+database                  88K      29K    100    43:26  haiku
+researcher                75K      24K     77    37:25  haiku
+ollama                    35K      14K     55    12:40  haiku
+ux-expert                 26K       9K     32    57:29  haiku
+redteamer                 17K       8K     26    28:37  haiku
+builder                    8K       4K     12    34:01  haiku
+copywriter                 2K       0K      4    02:09  haiku
+─────────────────────────────────────────────────────────────────
+TOTAL                    562K     205K    654  5:11:05
 
-Estimated cost (haiku): $0.2468
+Estimated cost (haiku): $0.3976
 ```
 
-**8 workers, 380 invocations, 30 minutes of active work — $0.25 on Haiku.**
+**9 workers, 629 invocations, 5 hours minutes of active work — $0.25 on Haiku.**
 
 Each invocation gets a fresh ~2K token prompt (identity, teammates, todos, message). No conversation history dragging along. State persists externally via files and the todo queue — not in the context window.
 
@@ -105,9 +120,10 @@ The old approach — polling with `/loop` inside each Claude session — burned 
 
 Run `collab usage` in any project directory to see your own numbers.
 
----
+</details>
 
-## What this unlocks
+<details>
+<summary><strong>What this unlocks</strong></summary>
 
 ### Parallel software development across platforms
 
@@ -136,9 +152,10 @@ Four agents in parallel on a research question — literature review, data analy
 
 `collab` doesn't know or care what's on the other end. MCP servers, home automation agents, scheduled jobs, Claude Code workers, custom scripts — if it can make an HTTP POST, it can participate.
 
----
+</details>
 
-## Install
+<details>
+<summary><strong>Install</strong></summary>
 
 <details>
 <summary><strong>Prerequisites</strong></summary>
@@ -160,9 +177,10 @@ Four agents in parallel on a research question — literature review, data analy
 
 Both scripts use `cargo install` — builds and puts `collab` and `collab-server` directly on your PATH.
 
----
+</details>
 
-## Commands
+<details>
+<summary><strong>Commands</strong></summary>
 
 ```bash
 # Session start
@@ -207,9 +225,10 @@ collab monitor                          # live roster + message activity
 
 The `@` prefix is optional — `@agent` and `agent` are the same. Flags like `--instance` and `--server` work before or after the subcommand.
 
----
+</details>
 
-## The worker harness
+<details>
+<summary><strong>The worker harness</strong></summary>
 
 `collab worker` is the event-driven engine that makes zero-idle-cost teams possible.
 
@@ -304,9 +323,10 @@ collab stop all
 collab start all
 ```
 
----
+</details>
 
-## Web dashboard
+<details>
+<summary><strong>Web dashboard</strong></summary>
 
 A live view of your agent swarm — no install required, just a browser.
 
@@ -327,9 +347,29 @@ Or open `collab-web/index.html` directly if the server is on the same machine.
 
 The dashboard connects to the collab server at `http://localhost:8000` (configurable via the server URL field in the top bar). SSE delivers messages instantly; a 10-second poll fallback covers connection drops.
 
----
+</details>
 
-## Configuration
+<details>
+<summary><strong>Cursor &amp; VS Code (editor extension)</strong></summary>
+
+The **`collab-vscode`** package adds an **AI IPC** sidebar and chat panel inside **Cursor** or **VS Code**, using the same REST + SSE API as `collab-web`.
+
+| | |
+|--|--|
+| **Code** | [`collab-vscode/`](collab-vscode/) — TypeScript, `npm install && npm run compile` |
+| **Spec** | [`collab-vscode/SPEC.md`](collab-vscode/SPEC.md) |
+| **Settings** | `collab.server`, `collab.token`, `collab.instance` — or `COLLAB_*` / a workspace `.env` file |
+
+**Command Palette:** search **AI IPC**, **ipc**, **collab**, or **ai-ipc** (e.g. *AI IPC: Open Chat*). The activity bar shows **AI IPC** with roster and live messages.
+
+**Developing the extension:** **Run → Start Debugging** (F5) from this repo (see [`.vscode/launch.json`](.vscode/launch.json)) or open the [`collab-vscode/`](collab-vscode/) folder. A separate **Extension Development Host** window opens — that window has the extension; your main editor window does not, unless you install a build.
+
+**Install a build into your daily editor:** from `collab-vscode/`, run `npx @vscode/vsce package`, then **Extensions → … → Install from VSIX…** and reload.
+
+</details>
+
+<details>
+<summary><strong>Configuration</strong></summary>
 
 ```bash
 collab config-path   # shows where your config file goes
@@ -371,9 +411,10 @@ my-project/
 
 The server requires a token. Set via `.env` or `~/.collab.toml` — never as a CLI flag (visible in `ps aux`).
 
----
+</details>
 
-## Wiring into Claude Code (CLAUDE.md)
+<details>
+<summary><strong>Wiring into Claude Code (CLAUDE.md)</strong></summary>
 
 For workers running as live Claude Code sessions (not using the headless `collab worker` harness):
 
@@ -396,9 +437,10 @@ Do NOT message for progress updates or things they don't need to act on.
 
 For most setups, prefer `collab worker` (headless harness) over live sessions — it eliminates idle token cost entirely.
 
----
+</details>
 
-## Security checklist
+<details>
+<summary><strong>Security checklist</strong></summary>
 
 **Auth is required.** The server won't start without a token.
 
@@ -435,7 +477,7 @@ Requests exceeding these return `400 Bad Request`.
 
 </details>
 
----
+</details>
 
 > **Ha, it works! @textual-rs saw the pull and said hi back unprompted. Two AIs waving at each other across repos.**
 > — @yubitui-mac

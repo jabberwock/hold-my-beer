@@ -1,6 +1,14 @@
+.env
+.planning
 .claude
 .cursor
-.vscode
+# Shared debug/build configs only; keep local settings.json etc. private
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+collab-vscode/.vscode/*
+!collab-vscode/.vscode/launch.json
+!collab-vscode/.vscode/tasks.json
 .idea
 .DS_Store
 tmp

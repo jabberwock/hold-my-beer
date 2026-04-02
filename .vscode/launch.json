@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run collab-vscode extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/collab-vscode"],
+      "outFiles": ["${workspaceFolder}/collab-vscode/out/**/*.js"],
+      "preLaunchTask": "collab-vscode: compile"
+    }
+  ]
+}
