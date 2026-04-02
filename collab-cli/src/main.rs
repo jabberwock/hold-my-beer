@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
         }
 
         let content = std::fs::read_to_string(&log_path)?;
-        let mut per_worker: std::collections::HashMap<String, (u64, u64, u64, u32)> = std::collections::HashMap::new();
+        let mut per_worker: std::collections::HashMap<String, (u64, u64, u64, u32, String)> = std::collections::HashMap::new();
         let mut total_input: u64 = 0;
         let mut total_output: u64 = 0;
         let mut total_duration: u64 = 0;
@@ -482,17 +482,19 @@ async fn main() -> Result<()> {
                 let dur: u64 = cols[2].parse().unwrap_or(0);
                 let inp: u64 = cols[3].parse().unwrap_or(0);
                 let out: u64 = cols[4].parse().unwrap_or(0);
+                let model = if cols.len() >= 6 { cols[5].to_string() } else { "?".to_string() };
 
                 total_input += inp;
                 total_output += out;
                 total_duration += dur;
                 total_calls += 1;
 
-                let entry = per_worker.entry(worker).or_insert((0, 0, 0, 0));
+                let entry = per_worker.entry(worker).or_insert((0, 0, 0, 0, model.clone()));
                 entry.0 += inp;
                 entry.1 += out;
                 entry.2 += dur;
                 entry.3 += 1;
+                entry.4 = model;
             }
         }
 
@@ -505,17 +507,17 @@ async fn main() -> Result<()> {
         };
 
         println!("Token usage (estimated ~4 chars/token)\n");
-        println!("{:<20} {:>8} {:>8} {:>6} {:>8}", "Worker", "Input", "Output", "Calls", "Time");
-        println!("{}", "─".repeat(55));
+        println!("{:<20} {:>8} {:>8} {:>6} {:>8}  {}", "Worker", "Input", "Output", "Calls", "Time", "Model");
+        println!("{}", "─".repeat(65));
 
         let mut workers: Vec<_> = per_worker.iter().collect();
         workers.sort_by(|a, b| (b.1.0 + b.1.1).cmp(&(a.1.0 + a.1.1)));
 
-        for (name, (inp, out, dur, calls)) in &workers {
-            println!("{:<20} {:>7}K {:>7}K {:>6} {:>8}", name, inp / 1000, out / 1000, calls, fmt_time(*dur));
+        for (name, (inp, out, dur, calls, model)) in &workers {
+            println!("{:<20} {:>7}K {:>7}K {:>6} {:>8}  {}", name, inp / 1000, out / 1000, calls, fmt_time(*dur), model);
         }
 
-        println!("{}", "─".repeat(55));
+        println!("{}", "─".repeat(65));
         println!("{:<20} {:>7}K {:>7}K {:>6} {:>8}", "TOTAL", total_input / 1000, total_output / 1000, total_calls, fmt_time(total_duration));
 
         // Rough cost estimate (haiku)
