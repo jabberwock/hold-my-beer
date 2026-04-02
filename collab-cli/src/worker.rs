@@ -42,6 +42,10 @@ struct CollabOutput {
     /// Task hashes marked as completed this invocation
     #[serde(default)]
     pub completed_tasks: Vec<String>,
+    /// If true, harness re-sends this output back to the worker as a new message,
+    /// keeping them working autonomously until they're actually blocked.
+    #[serde(default)]
+    pub r#continue: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -296,6 +300,7 @@ Instructions: Act on the messages above. Use Bash/Read/Write/Edit to do your act
   \"response\": \"your reply to the sender (string or null)\",
   \"delegate\": [{{\"to\": \"@worker\", \"task\": \"description\"}}],
   \"completed_tasks\": [\"hash1\", \"hash2\"],
+  \"continue\": false,
   \"state_update\": {{\"key\": \"value\"}}
 }}
 ---END_COLLAB_OUTPUT---
@@ -304,6 +309,7 @@ Instructions: Act on the messages above. Use Bash/Read/Write/Edit to do your act
 - \"response\": message back to whoever messaged you
 - \"delegate\": assign new tasks to teammates
 - \"completed_tasks\": list task hashes you finished (from your pending tasks above). The harness will mark them done and auto-route your output to downstream workers.
+- \"continue\": set true to keep working — the harness will re-invoke you immediately with your output as context. Use this when you have more work to do. Set false when you're blocked or done.
 - \"state_update\": persist any state for your next invocation
 
 Do NOT run any collab CLI commands. The harness handles all messaging and task delivery. Focus on your actual work.",
@@ -405,6 +411,17 @@ Do NOT run any collab CLI commands. The harness handles all messaging and task d
                     } else {
                         self.log(&format!("pipeline → @{}", to));
                     }
+                }
+            }
+
+            // Self-kick: worker wants to keep going
+            if collab_output.r#continue {
+                let kick_msg = collab_output.response.as_deref().unwrap_or("Continuing...");
+                let self_msg = format!("(self-continue) Previous output: {}", kick_msg);
+                if let Err(e) = self.client.add_message(&self.instance_id, &self_msg, None).await {
+                    self.log_error(&format!("Failed to self-kick: {}", e));
+                } else {
+                    self.log("continuing → self-kick");
                 }
             }
 
