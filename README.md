@@ -16,6 +16,44 @@ It's a tiny server that gives every agent a mailbox. Agents can send messages to
 
 ---
 
+## Quick Start (5 minutes)
+
+```bash
+# 1. Create a simple workers config
+cat > workers.yaml <<EOF
+server: http://localhost:8000
+workers:
+  - name: frontend
+    role: "Frontend development"
+  - name: backend
+    role: "Backend API development"
+EOF
+
+# 2. Initialize workers
+collab init workers.yaml
+
+# 3. In Terminal 1: start the server
+collab-server
+
+# 4. In Terminal 2: start workers
+collab start all
+collab lifecycle-status        # verify they're running
+
+# 5. In Terminal 3: stream messages
+export COLLAB_INSTANCE=frontend
+collab stream --role "Building login UI"
+
+# 6. In Terminal 4: send your first message
+export COLLAB_INSTANCE=backend
+collab add @frontend "API endpoints ready"
+```
+
+Watch Terminal 3 — you'll see the message appear instantly. ✓
+
+For detailed documentation, see [CLAUDE.md](./CLAUDE.md).
+
+---
+
 ## Teams, not just swarms
 
 Running agents in parallel is table stakes. What's harder — and more interesting — is that a group of agents working on the same project behaves differently depending on whether they have social infrastructure or not.
@@ -246,61 +284,6 @@ export COLLAB_REPO=https://github.com/owner/repo
 
 Message hashes and refs in the detail view will link to `$COLLAB_REPO/commit/<hash>`.
 Requires a terminal with OSC 8 support (iTerm2, Ghostty, WezTerm, Windows Terminal, kitty).
-
----
-
-## Quick-start a team with `collab init`
-
-The fastest way to spin up a coordinated agent swarm:
-
-**1. Create a `.env` file with your token:**
-
-```
-COLLAB_TOKEN=your-shared-secret
-```
-
-**2. Create a workers YAML file:**
-
-```yaml
-# workers.yaml
-server: http://localhost:8000
-output_dir: ./workers
-codebase_path: /path/to/your/project
-workers:
-  - name: frontend
-    role: "Build the React UI and manage component state"
-  - name: backend
-    role: "Implement REST API endpoints and database queries"
-  - name: manager
-    role: "Coordinate the team, review work, unblock workers"
-```
-
-**3. Generate the worker environments:**
-
-```bash
-collab init workers.yaml
-```
-
-This creates a directory for each worker containing a `CLAUDE.md` with full instructions — identity, teammates, collab commands, rules, and their specific tasks. Also outputs a `dashboard-config.json` for the web dashboard.
-
-**4. Start them up:**
-
-```bash
-collab-server                  # in one terminal
-collab start all               # in another — launches all workers
-collab lifecycle-status        # verify they're running
-```
-
-Each worker connects via SSE and waits for messages. Send one to kick things off:
-
-```bash
-collab add @manager "Project goal: build the user dashboard. Start by assigning tasks."
-```
-
-Or run the interactive wizard (requires `--features monitor`):
-```bash
-collab init
-```
 
 ---
 
