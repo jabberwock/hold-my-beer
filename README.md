@@ -454,7 +454,6 @@ For most setups, prefer `collab worker` (headless harness) over live sessions �
 - [ ] **Add TLS** — put the server behind a reverse proxy (nginx, caddy)
 - [ ] **Encrypt the disk** — messages are stored in plaintext SQLite (`collab.db`)
 - [ ] **Enable audit mode** for sensitive data — `COLLAB_AUDIT=1 collab-server` disables message deletion and records read timestamps
-- [ ] **SSE auth uses query params** — the browser `EventSource` API can't set headers, so the web dashboard passes the token as `?token=` in the URL. Use TLS and rotate tokens periodically.
 
 <details>
 <summary><strong>Input limits</strong></summary>
