@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# ollama-web — ollama wrapper with web search/fetch capability
+# Usage: ollama-web -p "prompt" --model qwen2.5-coder:14b
+#
+# The model can use these tool patterns in its output:
+#   [SEARCH: query]     → runs a web search via ddgr and feeds results back
+#   [FETCH: url]        → fetches URL content and feeds it back
+#
+# The script loops until the model produces output with no tool calls (max 5 rounds).
+
+set -euo pipefail
+
+MODEL="qwen2.5-coder:14b"
+PROMPT=""
+MAX_ROUNDS=5
+NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p) PROMPT="$2"; shift 2 ;;
+        --model) MODEL="$2"; shift 2 ;;
+        --num-ctx) NUM_CTX="$2"; shift 2 ;;
+        *) PROMPT="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROMPT" ]]; then
+    echo "Usage: ollama-web -p \"prompt\" [--model MODEL]" >&2
+    exit 1
+fi
+
+do_search() {
+    local query="$1"
+    # Try ddgr (DuckDuckGo CLI), fall back to curl+scrape
+    if command -v ddgr &>/dev/null; then
+        ddgr --np --np -n 5 --json "$query" 2>/dev/null | head -c 4000
+    else
+        # Fallback: use curl with DuckDuckGo lite
+        curl -s "https://lite.duckduckgo.com/lite/?q=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$query'))")" \
+            | python3 -c "
+import sys, re, html
+text = sys.stdin.read()
+results = re.findall(r'<a[^>]*class=\"result-link\"[^>]*href=\"([^\"]+)\"[^>]*>([^<]+)</a>', text)
+if not results:
+    results = re.findall(r'<a[^>]*href=\"(https?://[^\"]+)\"[^>]*>([^<]+)</a>', text)
+for url, title in results[:5]:
+    print(f'{html.unescape(title).strip()}: {url}')
+" 2>/dev/null | head -c 4000
+    fi
+}
+
+do_fetch() {
+    local url="$1"
+    # Fetch and extract readable text
+    curl -sL --max-time 10 --max-filesize 1048576 "$url" 2>/dev/null \
+        | python3 -c "
+import sys, re, html
+raw = sys.stdin.read()
+# Strip scripts, styles, tags
+text = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL)
+text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+text = re.sub(r'<[^>]+>', ' ', text)
+text = html.unescape(text)
+text = re.sub(r'\s+', ' ', text).strip()
+print(text[:6000])
+" 2>/dev/null
+}
+
+current_prompt="$PROMPT
+
+You have access to web tools. To use them, include these exact patterns in your output:
+[SEARCH: your search query]
+[FETCH: https://example.com/page]
+
+You can use multiple tools in one response. After tool results are provided, continue your work.
+When you are done and need no more web lookups, just output your final answer with no tool patterns."
+
+for round in $(seq 1 $MAX_ROUNDS); do
+    # Run ollama
+    OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+    response=$(curl -s "$OLLAMA_HOST/api/generate" \
+        -d "$(jq -n --arg model "$MODEL" --arg prompt "$current_prompt" --argjson ctx "$NUM_CTX" \
+        '{model: $model, prompt: $prompt, stream: false, options: {num_ctx: $ctx}}')" \
+        | jq -r '.response // empty')
+
+    # Extract tool calls
+    searches=$(echo "$response" | grep -oP '\[SEARCH:\s*\K[^\]]+' || true)
+    fetches=$(echo "$response" | grep -oP '\[FETCH:\s*\K[^\]]+' || true)
+
+    # If no tool calls, we're done
+    if [[ -z "$searches" && -z "$fetches" ]]; then
+        echo "$response"
+        exit 0
+    fi
+
+    # Execute tools and build context
+    tool_results=""
+
+    while IFS= read -r query; do
+        [[ -z "$query" ]] && continue
+        result=$(do_search "$query")
+        tool_results+="
+--- Search results for: $query ---
+$result
+"
+    done <<< "$searches"
+
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        url=$(echo "$url" | xargs)  # trim whitespace
+        result=$(do_fetch "$url")
+        tool_results+="
+--- Content from: $url ---
+$result
+"
+    done <<< "$fetches"
+
+    # Feed results back
+    current_prompt="Previous response:
+$response
+
+Tool results:
+$tool_results
+
+Continue your work using the tool results above. If you need more lookups, use [SEARCH: ...] or [FETCH: ...]. Otherwise, output your final answer with no tool patterns."
+done
+
+# Max rounds hit — output last response
+echo "$response"
