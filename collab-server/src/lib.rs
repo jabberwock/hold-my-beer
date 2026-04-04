@@ -751,15 +751,57 @@ async fn create_todo(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json(Todo {
+    let todo = Todo {
         id,
-        hash,
-        instance: payload.instance,
-        assigned_by: payload.assigned_by,
-        description: payload.description,
+        hash: hash.clone(),
+        instance: payload.instance.clone(),
+        assigned_by: payload.assigned_by.clone(),
+        description: payload.description.clone(),
         created_at: now,
         completed_at: None,
-    }))
+    };
+
+    // Wake the worker via SSE — send a ping message so it picks up the task immediately
+    let ping_content = format!("New task assigned: {}", payload.description);
+    let ping_id = Uuid::new_v4().to_string();
+    let ping_ts = Utc::now();
+    let mut ping_hasher = Sha1::new();
+    ping_hasher.update(payload.assigned_by.as_bytes());
+    ping_hasher.update(b"|");
+    ping_hasher.update(payload.instance.as_bytes());
+    ping_hasher.update(b"|");
+    ping_hasher.update(ping_content.as_bytes());
+    ping_hasher.update(b"|");
+    ping_hasher.update(ping_ts.to_rfc3339().as_bytes());
+    let ping_hash = format!("{:x}", ping_hasher.finalize());
+
+    let ping_ts_iso = ping_ts.to_rfc3339();
+    let _ = sqlx::query(
+        r#"INSERT INTO messages (id, hash, sender, recipient, content, refs, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind(&ping_id)
+    .bind(&ping_hash)
+    .bind(&payload.assigned_by)
+    .bind(&payload.instance)
+    .bind(&ping_content)
+    .bind("")
+    .bind(&ping_ts_iso)
+    .execute(&state.db)
+    .await;
+
+    let _ = state.tx.send(Arc::new(Message {
+        id: ping_id,
+        hash: ping_hash,
+        sender: payload.assigned_by,
+        recipient: payload.instance,
+        content: ping_content,
+        refs: vec![],
+        timestamp: ping_ts,
+        read_at: None,
+    }));
+
+    Ok(Json(todo))
 }
 
 async fn list_todos(
