@@ -136,7 +136,7 @@ Each invocation gets a fresh prompt (identity, teammates, todos, message). No co
 | Sonnet | ~$6 | $0 |
 | Opus | ~$30 | $0 |
 
-The old approach — polling with `/loop` inside each Claude session — burned ~270K tokens/hour on 9 idle agents. At Sonnet pricing, **$8-10 per session wasted on nothing.** The event-driven harness eliminates this entirely.
+The old approach — polling with `/loop` inside each session — burned ~270K tokens/hour on 9 idle agents. At Sonnet pricing, **$8-10 per session wasted on nothing.** The event-driven harness eliminates this entirely.
 
 Run `collab usage` in any project directory to see your own numbers.
 
@@ -373,6 +373,10 @@ The dashboard connects to the collab server at `http://localhost:8000` (configur
 
 <details>
 <summary><strong>Cursor &amp; VS Code (editor extension)</strong></summary>
+
+
+**Copilot users: It is strongly recommended to use this extension over the the `copilot` CLI command for Copilot, as Copilot charges 1 premium request per user prompt!**
+
 
 The **`collab-vscode`** package adds an **AI IPC** sidebar and chat panel inside **Cursor** or **VS Code**, using the same REST + SSE API as `collab-web`.
 
