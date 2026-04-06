@@ -1,6 +1,6 @@
-# AI IPC
+# Hold My Beer
 
-[![CI](https://github.com/jabberwock/ai-ipc/actions/workflows/rust.yml/badge.svg)](https://github.com/jabberwock/ai-ipc/actions "GitHub Actions")
+[![CI](https://github.com/jabberwock/hold-my-beer/actions/workflows/rust.yml/badge.svg)](https://github.com/jabberwock/hold-my-beer/actions "GitHub Actions")
 [![License](https://img.shields.io/badge/License-AGPL--3.0%20%2B%20Commons%20Clause-30363D?style=flat&labelColor=1e3a5f)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![YouTube — demo](https://img.shields.io/badge/YouTube-Watch%20demo-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=JJQKMES5zOY)
@@ -11,7 +11,7 @@ Smart tools are everywhere, but most still work in **silos**: one drafts a docum
 
 Picture something ambitious — purely as an example: you describe a jet engine as a 3D design, and a chain of people, AIs, and suppliers turns that into **real parts at your warehouse a month later**. This software doesn’t pick manufacturers or promise dates. What it *does* is give that chain a **common switchboard**: who said what, what’s next, who’s on duty, and what’s still open — so the plan doesn’t die because something never got the message.
 
-**AI IPC** is that idea in a box: **messages, tasks, who’s online, and broadcasts** — the same coordination primitives you’d want for a human team, for any mix of assistants and scripts you choose to plug in. The ceiling is what you connect; the floor is “things can finally talk to each other on purpose.”
+**Hold My Beer** is that idea in a box: **messages, tasks, who’s online, and broadcasts** — the same coordination primitives you’d want for a human team, for any mix of assistants and scripts you choose to plug in. The ceiling is what you connect; the floor is “things can finally talk to each other on purpose.”
 
 *If you’re not technical:* you don’t need to know how it’s built — think **shared project line for machines**, not a single smarter chatbot. *If you are:* the server and CLI are named **`collab`**, there’s a web dashboard, editor hooks, and the usual APIs — all spelled out below.
 
@@ -95,25 +95,20 @@ collab stream --role "Building login UI"
 
 Real numbers from a live 9-worker team building a Diablo 4 app:
 
-```
-collab usage
-Token usage (estimated ~4 chars/token)
+```bash
+$ collab usage
 
-Worker                  Input   Output  Calls     Time  Model
-─────────────────────────────────────────────────────────────────
-project-manager          172K      74K    204    51:20  haiku
-validator                136K      39K    144    43:58  haiku
-database                  88K      29K    100    43:26  haiku
-researcher                75K      24K     77    37:25  haiku
-ollama                    35K      14K     55    12:40  haiku
-ux-expert                 26K       9K     32    57:29  haiku
-redteamer                 17K       8K     26    28:37  haiku
-builder                    8K       4K     12    34:01  haiku
-copywriter                 2K       0K      4    02:09  haiku
-─────────────────────────────────────────────────────────────────
-TOTAL                    562K     205K    654  5:11:05
+Token usage (actual)
 
-Estimated cost (haiku): $0.3976
+Worker                  Input   Output  Calls     Time  CLI        Tiers      Todos   Cost
+────────────────────────────────────────────────────────────────────────────────────────────────
+d4-stats               20289K     205K     93    48:15  gemini     53F/40L    —       $5.2139
+d4-media               12166K     159K     61    33:24  claude     39F/22L    2       $3.9401
+d4-builder             11678K     169K     54  1:13:11  codex      33F/21L    3       $10.2034
+d4-pm                      9K       1K      7    00:29  ollama-web 6F/1L      —       $0.0000
+────────────────────────────────────────────────────────────────────────────────────────────────
+TOTAL                  44143K     536K    215  2:35:19             131F/84L   5       $19.3575
+
 ```
 
 **9 workers, 629 invocations, 5 hours minutes of active work — $0.25 on Haiku.**
@@ -123,7 +118,7 @@ Each invocation gets a fresh prompt (identity, teammates, todos, message). No co
 **Prompt tiering** automatically reduces token usage based on message complexity:
 
 | Tier | When | What happens |
-|------|------|-------------|
+| > | > | > |
 | **Harness** | Pings, status checks | Instant reply from state file — no CLI spawn, zero tokens |
 | **Light** | Short messages, no pending todos | Compact prompt (~500 tokens) — role + message only |
 | **Full** | Complex tasks, pending todos, self-kicks | Full context (~2K tokens) — teammates, state, todos, schema |
@@ -131,7 +126,7 @@ Each invocation gets a fresh prompt (identity, teammates, todos, message). No co
 `collab usage` shows the tier breakdown per worker (e.g. `12F/5L` = 12 full, 5 light calls).
 
 | Model | Est. cost/hour (8 workers active) | Idle cost |
-|-------|-----------------------------------|-----------|
+| > | > | > 
 | Haiku | ~$0.50 | $0 |
 | Sonnet | ~$6 | $0 |
 | Opus | ~$30 | $0 |
@@ -149,7 +144,7 @@ Run `collab usage` in any project directory to see your own numbers.
 
 Three agents — one on macOS writing code, one on Linux running tests, one on Windows checking build compatibility — coordinating in real time:
 
-```
+```bash
 @kali → @mac   "phase 12 confirmed — all wizard flows pass on Linux"
 @win  → @mac   "build clean on Windows, textual-rs 0.3.9 pulled fine"
 @mac  → @kali @win  "new branch pushed, regression in key deletion — can you both retest?"
@@ -378,7 +373,7 @@ The dashboard connects to the collab server at `http://localhost:8000` (configur
 **Copilot users: It is strongly recommended to use this extension over the the `copilot` CLI command for Copilot, as Copilot charges 1 premium request per user prompt!**
 
 
-The **`collab-vscode`** package adds an **AI IPC** sidebar and chat panel inside **Cursor** or **VS Code**, using the same REST + SSE API as `collab-web`.
+The **`collab-vscode`** package adds an **Hold My Beer** sidebar and chat panel inside **Cursor** or **VS Code**, using the same REST + SSE API as `collab-web`.
 
 | | |
 |--|--|
@@ -386,7 +381,7 @@ The **`collab-vscode`** package adds an **AI IPC** sidebar and chat panel inside
 | **Spec** | [`collab-vscode/SPEC.md`](collab-vscode/SPEC.md) |
 | **Settings** | `collab.server`, `collab.token`, `collab.instance` — or `COLLAB_*` / a workspace `.env` file |
 
-**Command Palette:** search **AI IPC**, **ipc**, **collab**, or **ai-ipc** (e.g. *AI IPC: Open Chat*). The activity bar shows **AI IPC** with roster and live messages.
+**Command Palette:** search **Hold My Beer**, **ipc**, **collab**, or **hold-my-beer** (e.g. *Hold My Beer: Open Chat*). The activity bar shows **Hold My Beer** with roster and live messages.
 
 **Developing the extension:** **Run → Start Debugging** (F5) from this repo (see [`.vscode/launch.json`](.vscode/launch.json)) or open the [`collab-vscode/`](collab-vscode/) folder. A separate **Extension Development Host** window opens — that window has the extension; your main editor window does not, unless you install a build.
 
