@@ -5,6 +5,9 @@
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![YouTube — demo](https://img.shields.io/badge/YouTube-Watch%20demo-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=JJQKMES5zOY)
 
+[Official Website](https://holdmybeer.gg)
+
+
 **What if your AIs and automations could run a whole outcome together — not just answer one chat at a time?**
 
 Smart tools are everywhere, but most still work in **silos**: one drafts a document, another checks inventory, a third talks to a vendor. They don’t fail because they’re stupid; they fail because **nobody hands off the baton**. There’s no shared “team room” where work, status, and responsibility actually live.
