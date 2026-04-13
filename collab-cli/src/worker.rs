@@ -420,9 +420,27 @@ impl WorkerHarness {
         // Heartbeat presence every 30s — role updates dynamically from worker state
         let hb_client = self.client.clone();
         let hb_status = current_status.clone();
+        let hb_workdir = self.workdir.clone();
         tokio::spawn(async move {
             loop {
-                let role = hb_status.lock().await.clone();
+                // Load role from AGENT.md/CLAUDE.md dynamically on each heartbeat
+                let mut role = hb_status.lock().await.clone();
+                for filename in &["AGENT.md", "CLAUDE.md"] {
+                    let path = hb_workdir.join(filename);
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        for line in contents.lines() {
+                            if line.contains("Your role:") {
+                                if let Some(rest) = line.split("Your role:").nth(1) {
+                                    role = rest.trim().trim_end_matches('*').to_string();
+                                    break;
+                                }
+                            }
+                        }
+                        if !role.is_empty() && role != "Worker" {
+                            break;
+                        }
+                    }
+                }
                 let _ = hb_client.heartbeat(Some(&role)).await;
                 sleep(Duration::from_secs(30)).await;
             }
