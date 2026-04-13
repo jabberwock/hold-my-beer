@@ -610,18 +610,18 @@ function clearLaunchLog() {
 function buildWorkersYaml() {
   // Escape a string for use inside a double-quoted YAML scalar:
   // collapse any CR/LF variants to a space so the value stays on one line.
-  const yamlStr = s => s.replace(/"/g, '\\"').replace(/\r?\n|\r/g, ' ');
+  const yamlStr = s => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n|\r/g, ' ');
   const lines = [];
-  lines.push(`server: ${cfg.serverUrl}`);
+  lines.push(`server: "${yamlStr(cfg.serverUrl)}"`);
   lines.push(`cli_template: "${yamlStr(cfg.cliTemplate)}"`);
-  if (cfg.model) lines.push(`model: ${cfg.model}`);
+  if (cfg.model) lines.push(`model: "${yamlStr(cfg.model)}"`);
   lines.push(`output_dir: ./workers`);
-  lines.push(`codebase_path: ${cfg.projectDir}`);
+  lines.push(`codebase_path: "${yamlStr(cfg.projectDir)}"`);
   lines.push(`workers:`);
   for (const w of workers) {
     lines.push(`  - name: ${w.name}`);
     lines.push(`    role: "${yamlStr(w.role)}"`);
-    if (w.model) lines.push(`    model: ${w.model}`);
+    if (w.model) lines.push(`    model: "${yamlStr(w.model)}"`);
     if (w.cli_template) lines.push(`    cli_template: "${yamlStr(w.cli_template)}"`);
   }
   return lines.join('\n') + '\n';
