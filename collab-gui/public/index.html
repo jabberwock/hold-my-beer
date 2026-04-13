@@ -6,12 +6,14 @@
   <title>Hold My Beer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="app.css">
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap"></noscript>
+  <link rel="stylesheet" href="app.min.css">
 </head>
 
 <body>
 
+<main>
 <!-- ════════════════════════════════════════════════════════════════════════
      WIZARD
 ════════════════════════════════════════════════════════════════════════ -->
@@ -292,10 +294,11 @@
 
   </div><!-- .layout -->
 </div><!-- #dashboard -->
+</main>
 
 <!-- Toasts -->
 <div id="toasts" aria-live="assertive"></div>
 
-<script src="app.js"></script>
+<script defer src="app.min.js"></script>
 </body>
 </html>
