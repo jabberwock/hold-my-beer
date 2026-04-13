@@ -429,9 +429,17 @@ impl WorkerHarness {
                     let path = hb_workdir.join(filename);
                     if let Ok(contents) = std::fs::read_to_string(&path) {
                         for line in contents.lines() {
-                            if line.contains("Your role:") {
-                                if let Some(rest) = line.split("Your role:").nth(1) {
-                                    role = rest.trim().trim_end_matches('*').to_string();
+                            // Look for "Your role" (with or without colon, accounting for markdown)
+                            if let Some(pos) = line.find("Your role") {
+                                // Extract everything after "Your role" and any following punctuation/formatting
+                                let after_marker = &line[pos + "Your role".len()..];
+                                // Strip leading markdown (*), colons, and whitespace
+                                let cleaned = after_marker
+                                    .trim_start_matches(|c: char| c == '*' || c == ':' || c.is_whitespace())
+                                    .trim_end_matches('*')
+                                    .to_string();
+                                if !cleaned.is_empty() {
+                                    role = cleaned;
                                     break;
                                 }
                             }
