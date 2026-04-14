@@ -1,0 +1,38 @@
+name: CollabClient
+options:
+  bundleIdPrefix: com.holdmybeer
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+
+targets:
+  CollabClient:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources/CollabClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.holdmybeer.CollabClient
+        INFOPLIST_FILE: Sources/CollabClient/Info.plist
+        SWIFT_VERSION: "5.9"
+    info:
+      path: Sources/CollabClient/Info.plist
+      properties:
+        CFBundleDisplayName: "Hold My Beer"
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
