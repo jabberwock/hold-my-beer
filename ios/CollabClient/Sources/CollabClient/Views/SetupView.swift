@@ -8,6 +8,11 @@ struct SetupView: View {
     @State private var errorMsg: String?
     @State private var isTesting = false
     @State private var showToken = false
+    @FocusState private var focusedField: SetupField?
+
+    enum SetupField: Hashable {
+        case token, url, identity
+    }
 
     var body: some View {
         NavigationStack {
@@ -38,9 +43,13 @@ struct SetupView: View {
                                         .font(.system(.body, design: .monospaced))
                                         .autocorrectionDisabled()
                                         .textInputAutocapitalization(.never)
+                                        .focused($focusedField, equals: .token)
+                                        .textContentType(.none)
                                 } else {
                                     SecureField("your-secret-token", text: $token)
                                         .font(.system(.body, design: .monospaced))
+                                        .focused($focusedField, equals: .token)
+                                        .textContentType(.none)
                                 }
                                 Button(action: { showToken.toggle() }) {
                                     Image(systemName: showToken ? "eye.slash" : "eye")
@@ -53,6 +62,7 @@ struct SetupView: View {
                                 .foregroundStyle(.blue)
                             }
                         }
+                        .onTapGesture { focusedField = .token }
 
                         fieldGroup {
                             Label("Server URL", systemImage: "network")
@@ -63,7 +73,10 @@ struct SetupView: View {
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                                 .keyboardType(.URL)
+                                .focused($focusedField, equals: .url)
+                                .textContentType(.URL)
                         }
+                        .onTapGesture { focusedField = .url }
 
                         fieldGroup {
                             Label("Your identity in chat", systemImage: "person.fill")
@@ -72,7 +85,10 @@ struct SetupView: View {
                             TextField("human", text: $identity)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
+                                .focused($focusedField, equals: .identity)
+                                .textContentType(.username)
                         }
+                        .onTapGesture { focusedField = .identity }
                     }
 
                     if let err = errorMsg {
@@ -104,6 +120,7 @@ struct SetupView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 40)
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationBarTitleDisplayMode(.inline)
         }
         .onAppear {
