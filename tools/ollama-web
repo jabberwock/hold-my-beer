@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-MODEL="qwen2.5-coder:14b"
+MODEL="qwen2.5:14b"
 PROMPT=""
 MAX_ROUNDS=10
 NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
@@ -48,7 +48,28 @@ for url, title in results[:5]:
 
 do_bash() {
     local cmd="$1"
-    { bash -c "$cmd" 2>&1 || true; } | head -c 4000
+    # Sandbox writes to CWD + tmp dirs only. Reads + network stay open so
+    # binaries, libs, git/curl, etc. still work. Falls back to unsandboxed
+    # if sandbox-exec is unavailable (non-macOS).
+    if command -v sandbox-exec &>/dev/null; then
+        local profile
+        profile=$(mktemp -t ollama-web-sb.XXXXXX.sb)
+        trap "rm -f '$profile'" RETURN
+        cat > "$profile" <<EOF
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+    (subpath "$PWD")
+    (subpath "/tmp")
+    (subpath "/private/tmp")
+    (subpath "/private/var/folders")
+    (subpath "/dev"))
+EOF
+        { sandbox-exec -f "$profile" bash -c "$cmd" 2>&1 || true; } | head -c 4000
+    else
+        { bash -c "$cmd" 2>&1 || true; } | head -c 4000
+    fi
 }
 
 do_fetch() {
@@ -138,6 +159,32 @@ for round in $(seq 1 $MAX_ROUNDS); do
     assistant_msg=$(echo "$raw" | jq '.message')
     tool_calls=$(echo "$assistant_msg" | jq '.tool_calls // []')
     content=$(echo "$assistant_msg" | jq -r '.content // ""')
+
+    # Fallback: some models (notably qwen2.5-coder) emit tool calls as JSON in
+    # the content field instead of using the structured tool_calls field. Parse
+    # them out so the loop can still execute them.
+    if [[ "$(echo "$tool_calls" | jq 'length')" -eq 0 && -n "$content" ]]; then
+        parsed=$(echo "$content" | python3 -c "
+import sys, re, json
+text = sys.stdin.read()
+calls = []
+for m in re.findall(r'\{[\s\S]*?\}(?=\s*\{|\s*\Z)', text) or re.findall(r'\{[\s\S]*\}', text):
+    try:
+        obj = json.loads(m)
+    except Exception:
+        continue
+    name = obj.get('name') or obj.get('tool') or obj.get('function')
+    args = obj.get('arguments') or obj.get('args') or obj.get('parameters') or {}
+    if isinstance(name, str) and name in ('search', 'fetch', 'bash'):
+        calls.append({'function': {'name': name, 'arguments': args}})
+if calls:
+    print(json.dumps(calls))
+" 2>/dev/null)
+        if [[ -n "$parsed" ]]; then
+            tool_calls="$parsed"
+            assistant_msg=$(echo "$assistant_msg" | jq --argjson tc "$parsed" '.tool_calls = $tc | .content = ""')
+        fi
+    fi
 
     # No tool calls — we're done
     if [[ "$(echo "$tool_calls" | jq 'length')" -eq 0 ]]; then
