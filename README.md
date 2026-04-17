@@ -214,6 +214,15 @@ Four agents in parallel on a research question — literature review, data analy
 
 Both scripts use `cargo install` — builds and puts `collab` and `collab-server` directly on your PATH.
 
+**Contributing?** Enable the repo's pre-push hook so your push mirrors CI's audit check:
+
+```bash
+git config core.hooksPath .githooks
+cargo install cargo-audit   # if not already installed
+```
+
+Without this, a new advisory against a transitive dep will land as a red CI run instead of a local pre-push block.
+
 </details>
 
 <details>
