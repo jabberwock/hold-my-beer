@@ -252,7 +252,7 @@ collab broadcast "Shutting down: <brief summary of work done>"
 
 ## Output JSON — STRICT RULES
 
-Your final output must be ONLY a JSON object. Do NOT use `collab send`, `collab todo add`, or `collab broadcast` — the harness delivers those from your JSON output. Read commands (`collab status`, `collab todo list`) are fine if you need to verify state.
+Your final output must be ONLY a JSON object. Do NOT use `collab add`, `collab todo add`, or `collab broadcast` — the harness delivers those from your JSON output. Read commands (`collab status`, `collab todo list`, `collab whoami`) are fine if you need to verify state.
 
 - **`response`**: Reply to the sender only if they asked a direct question. Otherwise `null`.
 - **`delegate`**: Assign tasks to teammates. One entry per task. Description must be fully self-contained.

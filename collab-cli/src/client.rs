@@ -166,6 +166,21 @@ pub struct Todo {
 /// trait so tests can substitute a recording fake without touching the network.
 /// Methods here intentionally cover only what `process_messages` and the SSE
 /// loop need — not the entire CLI surface.
+/// Outcome of a lease acquire/heartbeat call. Callers inspect
+/// `.conflict` to decide whether to refuse to start.
+#[derive(Debug)]
+pub enum LeaseOutcome {
+    /// Lease is held (either freshly acquired, heartbeat-extended, or
+    /// taken over from a stale holder).
+    Held { taken_over: bool },
+    /// Another process holds a fresh lease for this identity.
+    Conflict {
+        holder_pid: i64,
+        holder_host: String,
+        seconds_since_heartbeat: i64,
+    },
+}
+
 #[async_trait]
 pub trait CollabApi: Send + Sync {
     async fn add_message(&self, recipient: &str, content: &str, refs: Option<Vec<String>>) -> Result<()>;
@@ -175,6 +190,14 @@ pub trait CollabApi: Send + Sync {
     async fn fetch_history_pub(&self, instance_id: &str) -> Result<Vec<Message>>;
     async fn fetch_todos(&self, instance: &str) -> Result<Vec<Todo>>;
     async fn heartbeat(&self, role: Option<&str>) -> Result<()>;
+
+    /// Acquire or extend the singleton worker lease for this instance.
+    /// Server-side uniqueness is enforced on (team_id, instance_id) — two
+    /// workers with the same name across different teams both succeed,
+    /// same-team duplicates get a Conflict.
+    async fn acquire_lease(&self, pid: i64, host: &str) -> Result<LeaseOutcome>;
+    /// Release the lease. Idempotent; safe to call even when we don't hold it.
+    async fn release_lease(&self, pid: i64) -> Result<()>;
 
     /// Base URL — used by the SSE loop to construct event-stream URLs.
     fn base_url(&self) -> &str;
@@ -215,6 +238,12 @@ impl CollabApi for CollabClient {
     async fn heartbeat(&self, role: Option<&str>) -> Result<()> {
         CollabClient::heartbeat(self, role).await
     }
+    async fn acquire_lease(&self, pid: i64, host: &str) -> Result<LeaseOutcome> {
+        CollabClient::acquire_lease(self, pid, host).await
+    }
+    async fn release_lease(&self, pid: i64) -> Result<()> {
+        CollabClient::release_lease(self, pid).await
+    }
 
     fn base_url(&self) -> &str { &self.base_url }
     fn bearer_token(&self) -> Option<&str> { self.token.as_deref() }
@@ -248,6 +277,77 @@ impl CollabClient {
         let url = format!("{}/presence/{}", self.base_url, self.instance_id);
         self.auth(self.client.put(&url))
             .json(&PresenceUpdate { role: role.map(|r| r.to_string()) })
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    /// Acquire or heartbeat the singleton worker lease. Callers pass their
+    /// own pid; we stamp it into the lease row so a second process claiming
+    /// the same identity can be rejected with 409 before it burns CLI
+    /// invocations. See `LeaseOutcome` for outcomes.
+    pub async fn acquire_lease(&self, pid: i64, host: &str) -> Result<LeaseOutcome> {
+        #[derive(Serialize)]
+        struct LeaseRequest<'a> {
+            instance_id: &'a str,
+            pid: i64,
+            host: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct LeaseState {
+            #[serde(default)]
+            taken_over: bool,
+        }
+        #[derive(Deserialize)]
+        struct LeaseConflict {
+            pid: i64,
+            host: String,
+            seconds_since_heartbeat: i64,
+        }
+
+        let url = format!("{}/worker/lease", self.base_url);
+        let resp = self
+            .auth(self.client.post(&url))
+            .json(&LeaseRequest {
+                instance_id: &self.instance_id,
+                pid,
+                host,
+            })
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let state: LeaseState = resp.json().await?;
+            Ok(LeaseOutcome::Held { taken_over: state.taken_over })
+        } else if status.as_u16() == 409 {
+            let conflict: LeaseConflict = resp.json().await?;
+            Ok(LeaseOutcome::Conflict {
+                holder_pid: conflict.pid,
+                holder_host: conflict.host,
+                seconds_since_heartbeat: conflict.seconds_since_heartbeat,
+            })
+        } else {
+            anyhow::bail!("lease acquire failed: HTTP {}", status);
+        }
+    }
+
+    pub async fn release_lease(&self, pid: i64) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            instance_id: &'a str,
+            pid: i64,
+            host: &'a str,
+        }
+        let url = format!("{}/worker/lease/{}", self.base_url, self.instance_id);
+        // Host isn't needed for release, but the endpoint shares the
+        // LeaseRequest schema — we send a placeholder.
+        self.auth(self.client.delete(&url))
+            .json(&Body {
+                instance_id: &self.instance_id,
+                pid,
+                host: "release",
+            })
             .send()
             .await?;
         Ok(())

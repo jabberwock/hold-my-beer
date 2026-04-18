@@ -408,7 +408,7 @@ impl WorkerHarness {
                         // roster reflects activity in real time instead of waiting up to
                         // 30s for the next heartbeat tick.
                         let senders: Vec<String> = messages.iter()
-                            .filter(|m| m.sender != instance_id)
+                            .filter(|m| m.sender != instance_id && m.sender != "system")
                             .map(|m| format!("@{}", m.sender))
                             .collect::<std::collections::HashSet<_>>()
                             .into_iter().collect();
@@ -839,7 +839,7 @@ When done, your FINAL output must be ONLY a JSON object (no other text before or
 Fields:
 - response: reply back to whoever messaged you
 - delegate: assign tasks to ANY instance (teammates, humans, anyone) — creates a persistent todo and pings them. If someone messages you asking for something and you need THEM to act, delegate back to THEM — not to a random teammate. IMPORTANT: do NOT put task assignments in response or messages, those are ephemeral and will be lost on context reset. The task description MUST be self-contained: include all facts, URLs, decisions, and context the recipient needs — they will NOT see the original messages that led to this task
-- messages: send messages to any teammate directly — for status updates and context only, NOT for assigning work (optional)
+- messages: null always. Never send status updates, confirmations, or narration. Use delegate for work assignments. If you have nothing to assign, omit this field entirely.
 - completed_tasks: task hashes you finished — marks done and routes to downstream workers (optional)
 - continue: true to keep working autonomously, false when blocked or done
 - state_update: persist state for next invocation. Include \"status\" to update your roster presence
@@ -1049,16 +1049,23 @@ Do NOT run any `collab` command in this session — the harness manages collab s
                 }
             }
 
-            // Delegate tasks — create todo (todo_add already sends a ping message)
-            // Validate target against known teammates to prevent hallucinated delegations
+            // Delegate tasks — create todo (todo_add already sends a ping message).
+            // Validate target against known teammates to prevent hallucinated
+            // delegations (ghost-worker todos that pile up on the server).
+            //
+            // Always validate — the previous guard short-circuited when
+            // `known_teammates` was empty, which let a solo worker invent
+            // teammates freely and led to the d4dataminer → @webdev incident.
+            // Self-delegation and the reserved broadcast target `@all` stay
+            // allowed so a worker can queue work for itself or ping everyone.
             let known_teammates: std::collections::HashSet<String> = self.teammates.iter()
                 .map(|(name, _)| name.clone())
                 .collect();
             for task in &collab_output.delegate {
                 let to = task.to.trim_start_matches('@');
-                if !known_teammates.is_empty() && !known_teammates.contains(to) && to != self.instance_id {
+                if !is_allowed_delegate_target(to, &self.instance_id, &known_teammates) {
                     self.log_error(&format!(
-                        "Skipping delegation to unknown worker @{} (not in teammates list) — possible hallucination",
+                        "Skipping delegation to unknown worker @{} (not a teammate, not self, not a reserved target) — possible hallucination",
                         to
                     ));
                     continue;
@@ -1387,9 +1394,54 @@ fn parse_collab_output(output: &str) -> Option<CollabOutput> {
     None
 }
 
+/// Whether `to` is a valid delegate target for a worker with the given
+/// `own_instance_id` and `known_teammates`. Reserved targets (`@all` for
+/// broadcast, `@human` for the person at the keyboard) and self-delegation
+/// are always allowed; everything else must be a known teammate or it's
+/// rejected as a hallucination.
+pub(crate) fn is_allowed_delegate_target(
+    to: &str,
+    own_instance_id: &str,
+    known_teammates: &std::collections::HashSet<String>,
+) -> bool {
+    if to == own_instance_id {
+        return true;
+    }
+    if to == "all" || to == "human" {
+        return true;
+    }
+    known_teammates.contains(to)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allowed_delegate_accepts_self_broadcast_human_and_teammates() {
+        let teammates: std::collections::HashSet<String> =
+            ["webdev", "architect"].iter().map(|s| s.to_string()).collect();
+        assert!(is_allowed_delegate_target("d4dataminer", "d4dataminer", &teammates), "self");
+        assert!(is_allowed_delegate_target("all", "d4dataminer", &teammates), "broadcast");
+        assert!(is_allowed_delegate_target("human", "d4dataminer", &teammates), "human");
+        assert!(is_allowed_delegate_target("webdev", "d4dataminer", &teammates), "known teammate");
+        assert!(!is_allowed_delegate_target("ghost", "d4dataminer", &teammates), "unknown rejected");
+    }
+
+    /// REGRESSION: the pre-fix guard short-circuited when teammates was empty,
+    /// which is how d4dataminer (solo, hands_off_to: []) silently created a
+    /// todo for the nonexistent @webdev. Empty teammates list must still
+    /// validate against the reserved allow-list.
+    #[test]
+    fn allowed_delegate_rejects_unknown_when_teammates_empty() {
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert!(!is_allowed_delegate_target("webdev", "d4dataminer", &empty),
+            "solo worker must not invent teammates — this is the d4dataminer regression");
+        // But the reserved targets still work even with no teammates.
+        assert!(is_allowed_delegate_target("human", "d4dataminer", &empty));
+        assert!(is_allowed_delegate_target("all", "d4dataminer", &empty));
+        assert!(is_allowed_delegate_target("d4dataminer", "d4dataminer", &empty), "self");
+    }
 
     #[test]
     fn parse_handles_null_fields() {
@@ -1714,6 +1766,10 @@ mod integration {
             Ok(self.todos.lock().unwrap().clone())
         }
         async fn heartbeat(&self, _role: Option<&str>) -> Result<()> { Ok(()) }
+        async fn acquire_lease(&self, _pid: i64, _host: &str) -> Result<crate::client::LeaseOutcome> {
+            Ok(crate::client::LeaseOutcome::Held { taken_over: false })
+        }
+        async fn release_lease(&self, _pid: i64) -> Result<()> { Ok(()) }
         fn base_url(&self) -> &str { "http://fake" }
         fn bearer_token(&self) -> Option<&str> { None }
         fn http_client(&self) -> &reqwest::Client { &self.sse_client }
