@@ -319,8 +319,11 @@ function renderWorkerCards() {
         <div class="wc-advanced" ${hasAdvanced ? '' : 'hidden'}>
           <div class="field">
             <label>Codebase path override</label>
-            <input class="inp wc-codebase inp-mono" type="text" value="${esc(w.codebase_path || '')}" placeholder="(use project folder from Step 2)">
-            <div class="hint-box">Absolute path. Set this when a worker lives in a different repo than the rest of the team.</div>
+            <div class="dir-row">
+              <input class="inp wc-codebase inp-mono" type="text" value="${esc(w.codebase_path || '')}" placeholder="(use project folder from Step 2)">
+              <button type="button" class="btn btn-ghost wc-browse">Browse</button>
+            </div>
+            <div class="hint-box">Set this when a worker lives in a different repo than the rest of the team.</div>
           </div>
           <div class="field">
             <label>Model override</label>
@@ -337,6 +340,19 @@ function renderWorkerCards() {
       const panel = div.querySelector('.wc-advanced');
       panel.hidden = !panel.hidden;
       e.target.textContent = (panel.hidden ? '▸' : '▾') + ' Advanced';
+    });
+    div.querySelector('.wc-browse').addEventListener('click', async () => {
+      try {
+        const dir = await invoke('pick_directory');
+        if (!dir) return;
+        const cbInput = div.querySelector('.wc-codebase');
+        cbInput.value = dir;
+        // Persist immediately so re-renders (e.g. from addWorker elsewhere)
+        // don't clobber the pick.
+        syncWorkersFromDom();
+      } catch (e) {
+        toast('Could not open directory picker: ' + e, true);
+      }
     });
     const rm = document.createElement('button');
     rm.className = 'btn btn-ghost btn-icon wc-remove';
