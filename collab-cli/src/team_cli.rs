@@ -263,7 +263,6 @@ pub fn adopt(workers_yml: &Path, team_yml_path: &Path) -> Result<()> {
             server: legacy.server.clone(),
             shared_data_dir: legacy.shared_data_dir.clone(),
             cli_template: legacy.cli_template.clone(),
-            cli_template_light: legacy.cli_template_light.clone(),
             model: legacy.model.clone(),
             workers: Vec::new(),
         }
@@ -294,7 +293,6 @@ pub fn adopt(workers_yml: &Path, team_yml_path: &Path) -> Result<()> {
             color: lw.color,
             model: lw.model.clone(),
             cli_template: lw.cli_template.clone(),
-            cli_template_light: lw.cli_template_light.clone(),
             hands_off_to: lw.hands_off_to.clone(),
         });
     }
@@ -408,8 +406,6 @@ struct TeamConfigMut {
     pub shared_data_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_template: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cli_template_light: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub workers: Vec<TeamWorker>,

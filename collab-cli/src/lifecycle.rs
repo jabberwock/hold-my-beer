@@ -123,9 +123,6 @@ pub struct WorkerManifestEntry {
     /// CLI command template with {prompt}, {model}, {workdir} placeholders
     #[serde(default)]
     pub cli_template: Option<String>,
-    /// CLI command template for light-tier calls (e.g. plan mode) — falls back to cli_template
-    #[serde(default)]
-    pub cli_template_light: Option<String>,
     /// Pipeline: workers to auto-dispatch to when this worker completes a task
     #[serde(default)]
     pub hands_off_to: Vec<String>,
@@ -182,8 +179,20 @@ pub fn spawn_worker(
         return Err(anyhow!("Invalid instance name: '{}'", instance_name));
     }
 
-    // Build command with validated arguments
-    let mut cmd = Command::new("collab");
+    // Build command with validated arguments. Self-spawn via current_exe
+    // so the worker runs the same binary as `collab start` — if we went
+    // through PATH, a stale global install (e.g. `cargo install`'d from
+    // a previous version) can shadow the freshly-built sidecar and the
+    // worker ends up running old code. COLLAB_WORKER_BIN is a test-only
+    // escape hatch (the stdio-isolation suite shadows the worker binary
+    // to prove detachment); production code should never set it. Falls
+    // back to PATH lookup only if the OS refuses to tell us our own
+    // path, which shouldn't happen.
+    let self_exe = std::env::var_os("COLLAB_WORKER_BIN")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| PathBuf::from("collab"));
+    let mut cmd = Command::new(self_exe);
     cmd.arg("worker")
         .arg("--workdir").arg(&validated_workdir)
         .arg("--model").arg(model);

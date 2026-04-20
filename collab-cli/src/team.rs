@@ -39,8 +39,6 @@ pub struct TeamConfig {
 
     /// CLI command template inherited by every worker unless they override it.
     pub cli_template: Option<String>,
-    /// Light-tier (cheap) variant of the template. Same inheritance rules.
-    pub cli_template_light: Option<String>,
     /// Default model. Only meaningful when `cli_template` uses {model}.
     pub model: Option<String>,
 
@@ -67,7 +65,6 @@ pub struct TeamWorker {
     pub color: Option<u8>,
     pub model: Option<String>,
     pub cli_template: Option<String>,
-    pub cli_template_light: Option<String>,
 
     /// Names of other workers in the same team to auto-handoff to.
     #[serde(default)]
@@ -214,10 +211,6 @@ impl TeamConfig {
     /// precedence over the team-level default.
     pub fn resolved_cli_template(&self, worker: &TeamWorker) -> Option<String> {
         worker.cli_template.clone().or_else(|| self.cli_template.clone())
-    }
-
-    pub fn resolved_cli_template_light(&self, worker: &TeamWorker) -> Option<String> {
-        worker.cli_template_light.clone().or_else(|| self.cli_template_light.clone())
     }
 
     pub fn resolved_model(&self, worker: &TeamWorker) -> Option<String> {

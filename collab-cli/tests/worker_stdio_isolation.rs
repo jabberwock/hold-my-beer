@@ -77,19 +77,17 @@ fn detached_stdio_grandchild_does_not_hold_parent_pipe() {
 
 /// End-to-end guard: exercises `spawn_worker` itself (not just the helper) so
 /// that deleting the `configure_detached_stdio` call from `lifecycle.rs` would
-/// fail this test. We shadow the real `collab` binary on PATH with a shell
-/// script that `exec cat`s — if stdio is detached the fake worker hits EOF on
-/// null stdin and exits in milliseconds; if inherited, it blocks on the test
-/// runner's tty and we trip the timeout.
+/// fail this test. We override the worker binary via COLLAB_WORKER_BIN (a
+/// test-only escape hatch that bypasses the normal `current_exe()` self-spawn)
+/// with a script that asserts FDs 0/1/2 point at /dev/null — if stdio is
+/// detached it exits 0 in milliseconds; if inherited, the FD comparison fails.
 #[test]
 fn spawn_worker_detaches_stdio_end_to_end() {
+    // PATH_LOCK still serializes env-var mutation across tests in this file.
     let _guard = PATH_LOCK.lock().unwrap();
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake_collab = tmp.path().join("collab");
-    // The fake asserts that FDs 0/1/2 all point at /dev/null by comparing
-    // device+inode via Python's os.fstat. Any inherited FD (even a closed
-    // tty or cargo's captured pipe) has a different (dev, ino) pair.
     let script = r#"#!/usr/bin/env python3
 import os, sys
 null = os.stat('/dev/null')
@@ -103,11 +101,9 @@ sys.exit(0)
     fs::set_permissions(&fake_collab, fs::Permissions::from_mode(0o755))
         .expect("chmod fake");
 
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let shadowed = format!("{}:{}", tmp.path().display(), original_path);
     // SAFETY: serialized by PATH_LOCK within this test file.
     unsafe {
-        std::env::set_var("PATH", &shadowed);
+        std::env::set_var("COLLAB_WORKER_BIN", &fake_collab);
     }
 
     let result = spawn_worker(
@@ -121,7 +117,7 @@ sys.exit(0)
     );
 
     unsafe {
-        std::env::set_var("PATH", &original_path);
+        std::env::remove_var("COLLAB_WORKER_BIN");
     }
 
     let mut child = result.expect("spawn_worker");

@@ -23,8 +23,6 @@ pub struct ProjectConfig {
     pub model: Option<String>,
     /// CLI command template with {prompt}, {model}, {workdir} placeholders
     pub cli_template: Option<String>,
-    /// CLI command template for light-tier calls (e.g. plan mode) — falls back to cli_template
-    pub cli_template_light: Option<String>,
     pub workers: Vec<WorkerConfig>,
 }
 
@@ -46,8 +44,6 @@ pub struct WorkerConfig {
     pub model: Option<String>,
     /// CLI command template — overrides project default if set
     pub cli_template: Option<String>,
-    /// CLI command template for light-tier calls — overrides project default if set
-    pub cli_template_light: Option<String>,
     /// Pipeline: workers to auto-dispatch to when this worker completes a task
     #[serde(default)]
     pub hands_off_to: Vec<String>,
@@ -55,7 +51,7 @@ pub struct WorkerConfig {
 
 impl ProjectConfig {
     pub fn new(server: String, output_dir: Option<String>, codebase_path: Option<String>, model: Option<String>, workers: Vec<WorkerConfig>) -> Self {
-        Self { server, output_dir, shared_data_dir: None, codebase_path, model, cli_template: None, cli_template_light: None, workers }
+        Self { server, output_dir, shared_data_dir: None, codebase_path, model, cli_template: None, workers }
     }
 }
 
@@ -322,15 +318,12 @@ fn write_worker_manifest(project_root: &Path, output_dir: &Path, output_dir_str:
         let cli_tmpl = Some(worker.cli_template.clone()
             .or_else(|| config.cli_template.clone())
             .unwrap_or_else(|| "{agent} -p {prompt} --model {model}".to_string()));
-        let cli_tmpl_light = worker.cli_template_light.clone()
-            .or_else(|| config.cli_template_light.clone());
         manifest_entries.push(WorkerManifestEntry {
             name: worker.name.clone(),
             role: worker.role.clone(),
             codebase_path,
             model: worker_model,
             cli_template: cli_tmpl,
-            cli_template_light: cli_tmpl_light,
             output_dir: {
                 let base_str = output_dir.to_string_lossy();
                 let clean = base_str.strip_prefix("./").unwrap_or(&base_str);

@@ -20,13 +20,21 @@ const ACK_START_PATTERN: &str = r"(?i)^(@[\w-]+[:,]?\s+)*\s*(acknowledged?|ackno
 const ACK_MAX_LEN: usize = 300;
 pub const DEFAULT_CLI_TEMPLATE: &str = "claude -p {prompt} --model {model} --allowedTools Bash,Read,Write,Edit";
 
+/// Two dispatches: either the Rust harness answers directly (pings, acks —
+/// no claude call), or we build a full context prompt and spawn the CLI.
+///
+/// An older design had a "Light" middle tier that stripped the teammates
+/// list, state, and (critically) the todo list for short single messages to
+/// save tokens. That optimisation was fighting prompt caching (static prefixes
+/// cache for ~10% of nominal cost) and actively broke the product: auto-kick
+/// nudges like "you have 6 pending tasks, pick up the next one" are short,
+/// routed as Light, and left the worker with no todo list to act on — calls
+/// hung for the full 300s timeout producing zero output. Dropped.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PromptTier {
-    /// Handled entirely by the harness — no CLI spawn
+    /// Handled entirely by the harness — no CLI spawn.
     Harness,
-    /// Minimal prompt — role + message + compact schema
-    Light,
-    /// Full prompt — teammates, state, todos, full schema
+    /// Full prompt — role, teammates, state, todos, history, schema.
     Full,
 }
 
@@ -34,7 +42,6 @@ impl std::fmt::Display for PromptTier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PromptTier::Harness => write!(f, "harness"),
-            PromptTier::Light => write!(f, "light"),
             PromptTier::Full => write!(f, "full"),
         }
     }
@@ -104,10 +111,8 @@ pub struct WorkerHarness {
     instance_id: String,
     workdir: PathBuf,
     model: String,
-    /// CLI command template for full-tier (agent mode) — {prompt}, {model}, {workdir} placeholders
+    /// CLI command template — {prompt}, {model}, {workdir} placeholders
     cli_template: String,
-    /// CLI command template for light-tier (plan/think mode) — if unset, falls back to cli_template
-    cli_template_light: Option<String>,
     auto_reply: bool,
     batch_wait_ms: u64,
     message_queue: Arc<Mutex<Vec<Message>>>,
@@ -128,7 +133,6 @@ impl WorkerHarness {
         workdir: PathBuf,
         model: String,
         cli_template: Option<String>,
-        cli_template_light: Option<String>,
         auto_reply: bool,
         batch_wait_ms: u64,
         hands_off_to: Vec<String>,
@@ -140,7 +144,6 @@ impl WorkerHarness {
             workdir,
             model,
             cli_template,
-            cli_template_light,
             auto_reply,
             batch_wait_ms,
             hands_off_to,
@@ -155,7 +158,6 @@ impl WorkerHarness {
         workdir: PathBuf,
         model: String,
         cli_template: Option<String>,
-        cli_template_light: Option<String>,
         auto_reply: bool,
         batch_wait_ms: u64,
         hands_off_to: Vec<String>,
@@ -167,7 +169,6 @@ impl WorkerHarness {
             workdir,
             model,
             cli_template: cli_template.unwrap_or_else(|| DEFAULT_CLI_TEMPLATE.to_string()),
-            cli_template_light,
             auto_reply,
             batch_wait_ms,
             message_queue: Arc::new(Mutex::new(Vec::new())),
@@ -208,24 +209,10 @@ impl WorkerHarness {
             return PromptTier::Harness;
         }
 
-        // Self-messages always need full context — the worker must see its todo list
-        // to act on tasks. Light tier omits todos, making these calls useless.
-        if messages.iter().any(|m| m.sender == self.instance_id) {
-            return PromptTier::Full;
-        }
-
-        // Multiple messages batched → full context
-        if messages.len() > 1 {
-            return PromptTier::Full;
-        }
-
-        // Single short external message with no todos → light
-        if let Some(msg) = messages.first() {
-            if msg.content.len() < 200 {
-                return PromptTier::Light;
-            }
-        }
-
+        // Anything that isn't a ping or ack needs the full prompt: the
+        // worker has to see its teammates, state, and todo list to do real
+        // work. Token cost is kept in check by prompt caching on the static
+        // prefix, not by classification heuristics.
         PromptTier::Full
     }
 
@@ -282,7 +269,6 @@ impl WorkerHarness {
         let workdir = self.workdir.clone();
         let model = self.model.clone();
         let cli_template = self.cli_template.clone();
-        let cli_template_light = self.cli_template_light.clone();
         let auto_reply = self.auto_reply;
         let hands_off_to = self.hands_off_to.clone();
         let teammates = self.teammates.clone();
@@ -303,7 +289,6 @@ impl WorkerHarness {
         let watchdog_workdir = workdir.clone();
         let watchdog_model = model.clone();
         let watchdog_cli_template = cli_template.clone();
-        let watchdog_cli_template_light = cli_template_light.clone();
         let watchdog_hands_off_to = hands_off_to.clone();
         let watchdog_teammates = teammates.clone();
         let watchdog_batch_status = current_status.clone();
@@ -319,7 +304,6 @@ impl WorkerHarness {
                     let workdir = watchdog_workdir.clone();
                     let model = watchdog_model.clone();
                     let cli_template = watchdog_cli_template.clone();
-                    let cli_template_light = watchdog_cli_template_light.clone();
                     let hands_off_to = watchdog_hands_off_to.clone();
                     let teammates = watchdog_teammates.clone();
                     let batch_status = watchdog_batch_status.clone();
@@ -375,7 +359,6 @@ impl WorkerHarness {
                     workdir: workdir.clone(),
                     model: model.clone(),
                     cli_template: cli_template.clone(),
-                    cli_template_light: cli_template_light.clone(),
                     auto_reply,
                     batch_wait_ms,
                     message_queue: Arc::new(Mutex::new(Vec::new())),
@@ -394,13 +377,14 @@ impl WorkerHarness {
                             harness.log_error(&format!("Harness tier failed: {}", e));
                         }
                     }
-                    _ => {
+                    PromptTier::Full => {
                         // Spawn CLI in a background task so the batch loop stays unblocked.
                         // cli_lock serializes invocations — only one claude process at a time.
                         let cli_lock = cli_lock.clone();
                         let batch_status = batch_status.clone();
                         let queue = queue.clone();
-                        let full_context = tier == PromptTier::Full;
+                        let first_time_for_kick = first_time.clone();
+                        let instance_id_for_kick = instance_id.clone();
                         let instance_id_for_log = instance_id.clone();
                         let hb_client = client.clone();
 
@@ -423,7 +407,7 @@ impl WorkerHarness {
                         let handle = tokio::spawn(async move {
                             let _guard = cli_lock.lock().await;
 
-                            let worker_continued = match harness.spawn_cli(&messages, full_context).await {
+                            let worker_continued = match harness.spawn_cli(&messages).await {
                                 Ok(c) => c,
                                 Err(e) => {
                                     harness.log_error(&format!("Failed to process {} messages: {}", messages.len(), e));
@@ -447,19 +431,33 @@ impl WorkerHarness {
                             }
 
                             // Auto-kick if worker has pending todos but didn't self-continue.
-                            // Skip if this was an auto-kick (avoid kick→kick→kick loops).
-                            let was_auto_kick = is_self_kick && messages.iter().any(|m| m.content.contains("pending tasks"));
+                            // Skip if this batch was itself an auto-kick (avoid kick→kick loops).
+                            //
+                            // The kick is queued directly as a sender="system" message rather
+                            // than posted through add_message — round-tripping through the
+                            // server would stamp sender=instance_id, which the batch loop
+                            // strips at line 356 as a self-message, and the kick would be
+                            // silently eaten. Same trap the boot-kick hit (see ~line 636).
+                            const AUTO_KICK_MARKER: &str = "[auto-kick] pending tasks";
+                            let was_auto_kick = messages.iter().any(|m|
+                                m.sender == "system" && m.content.starts_with(AUTO_KICK_MARKER)
+                            );
                             if !worker_continued && !was_auto_kick {
                                 if let Ok(todos) = harness.client.fetch_todos(&harness.instance_id).await {
                                     if !todos.is_empty() {
-                                        let q = queue.lock().await;
+                                        let mut q = queue.lock().await;
                                         if q.is_empty() {
-                                            drop(q);
-                                            let _ = harness.client.add_message(
-                                                &harness.instance_id,
-                                                &format!("You have {} pending tasks — pick up the next one when ready.", todos.len()),
-                                                None
-                                            ).await;
+                                            q.push(Message {
+                                                sender: "system".to_string(),
+                                                recipient: instance_id_for_kick.clone(),
+                                                content: format!(
+                                                    "{} — you have {} pending task(s). Pick up the next one when ready.",
+                                                    AUTO_KICK_MARKER, todos.len()
+                                                ),
+                                                hash: String::new(),
+                                                timestamp: Utc::now(),
+                                            });
+                                            *first_time_for_kick.lock().await = Some(Instant::now());
                                         }
                                     }
                                 }
@@ -492,11 +490,28 @@ impl WorkerHarness {
             }
         }); // end watchdog
 
-        // Heartbeat presence every 30s — role updates dynamically from worker state
+        // Heartbeat presence — role updates dynamically from worker state.
+        //
+        // Server-is-gone self-terminate: with the GUI's macOS Cmd+Q intercept
+        // wired up (see collab-gui/src-tauri/src/lib.rs::macos_quit_intercept),
+        // the dialog → `collab stop all` path is the primary cleanup. This
+        // loop only catches the residual cases where that path can't run:
+        // hard process kill (`kill -9`, Force Quit), power loss, or a server
+        // crash unrelated to user quit.
+        //
+        // Tightened to fail fast — a single 10s heartbeat outage is enough.
+        // The trade-off: ~10s of token burn after server disappears, vs.
+        // false-killing a worker if a network hiccup drops one heartbeat.
+        // For local-host server (the default), drops are essentially never
+        // network — they're the server actually being gone.
         let hb_client = self.client.clone();
         let hb_status = current_status.clone();
         let hb_workdir = self.workdir.clone();
+        let hb_instance_id = self.instance_id.clone();
+        const HEARTBEAT_INTERVAL_SECS: u64 = 10;
         tokio::spawn(async move {
+            const SELF_KILL_AFTER: u32 = 1;
+            let mut consecutive_failures: u32 = 0;
             loop {
                 // Load role from AGENT.md/CLAUDE.md dynamically on each heartbeat
                 let mut role = hb_status.lock().await.clone();
@@ -524,8 +539,57 @@ impl WorkerHarness {
                         }
                     }
                 }
-                let _ = hb_client.heartbeat(Some(&role)).await;
-                sleep(Duration::from_secs(30)).await;
+                match hb_client.heartbeat(Some(&role)).await {
+                    Ok(_) => {
+                        consecutive_failures = 0;
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        eprintln!(
+                            "[{}] [{}] heartbeat failed ({}/{}): {}",
+                            chrono::Utc::now().format("%H:%M:%S UTC"),
+                            hb_instance_id,
+                            consecutive_failures, SELF_KILL_AFTER, e
+                        );
+                        if consecutive_failures >= SELF_KILL_AFTER {
+                            eprintln!(
+                                "[{}] [{}] server unreachable for {} consecutive heartbeats — self-terminating to avoid running orphaned",
+                                chrono::Utc::now().format("%H:%M:%S UTC"),
+                                hb_instance_id,
+                                consecutive_failures
+                            );
+                            // Kill the whole process tree so any in-flight CLI
+                            // subprocess (claude -p, cursor -p, ollama …) goes
+                            // down with us. No child left holding tokens.
+                            //
+                            // Unix: `collab worker` was made a process group
+                            // leader by spawn_worker in lifecycle.rs, so one
+                            // `killpg(getpid(), SIGTERM)` cascades to everyone.
+                            //
+                            // Windows: no process-group equivalent — we shell
+                            // out to `taskkill /F /T /PID <self>` which kills
+                            // our PID and every descendant. Synchronous so we
+                            // don't race our own exit.
+                            #[cfg(unix)]
+                            unsafe {
+                                libc::killpg(std::process::id() as libc::pid_t, libc::SIGTERM);
+                            }
+                            #[cfg(windows)]
+                            {
+                                let pid = std::process::id().to_string();
+                                let _ = std::process::Command::new("taskkill")
+                                    .args(["/F", "/T", "/PID", &pid])
+                                    .status();
+                            }
+                            // Belt-and-suspenders: if the tree-kill didn't take
+                            // us down within a second (signal handler, taskkill
+                            // failure, etc.), force-exit this process.
+                            sleep(Duration::from_secs(1)).await;
+                            std::process::exit(0);
+                        }
+                    }
+                }
+                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS)).await;
             }
         });
 
@@ -646,10 +710,10 @@ impl WorkerHarness {
         }
     }
 
-    /// Build the prompt for a CLI invocation.
-    /// `full_context`: true = full prompt (teammates, state, todos, full schema), false = light prompt
-    async fn build_prompt(&self, messages: &[Message], full_context: bool) -> Result<String> {
-        // Format message lines (shared by both tiers)
+    /// Build the full-context prompt for a CLI invocation: role, teammates,
+    /// previous state, todo list, recent history, rules, and output schema.
+    async fn build_prompt(&self, messages: &[Message]) -> Result<String> {
+        // Format message lines
         let mut msg_lines = String::new();
         for msg in messages {
             let body = if msg.content.len() > 2000 {
@@ -663,82 +727,6 @@ impl WorkerHarness {
             msg_lines.push_str(&format!("@{}: {}\n", msg.sender, body));
         }
 
-        if !full_context {
-            // Light prompt — minimal context, plus a compact recent-history
-            // window so the worker isn't amnesic. Without this, a short reply
-            // like "how tf do I know?" routes to Light, strips all context,
-            // and the worker answers like it's a cold-boot stranger.
-            // Budget: 5 messages × 200 chars ≈ 200 tokens extra — keeps Light
-            // materially cheaper than Full while fixing the obvious failure.
-            let current_hashes: std::collections::HashSet<_> = messages.iter().map(|m| m.hash.as_str()).collect();
-            let history_str = match self.client.fetch_history_pub(&self.instance_id).await {
-                Ok(history) => {
-                    let recent: Vec<_> = history.iter()
-                        .filter(|m| !current_hashes.contains(m.hash.as_str()))
-                        .rev()
-                        .take(5)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    if recent.is_empty() {
-                        String::new()
-                    } else {
-                        let mut lines = String::from("Recent history (for context — act only on the new messages below):\n");
-                        for m in &recent {
-                            let content = if m.content.len() > 200 {
-                                format!("{}…", &m.content[..200])
-                            } else {
-                                m.content.clone()
-                            };
-                            lines.push_str(&format!("  @{} → @{}: {}\n", m.sender, m.recipient, content));
-                        }
-                        lines.push('\n');
-                        lines
-                    }
-                }
-                Err(_) => String::new(),
-            };
-
-            return Ok(format!(
-                "You are @{}. Role: {}
-
-{}New messages ({}):
-{}
-
-## CRITICAL RULES (absolute — no exceptions)
-
-**NO DATES OR TIMES.** Never mention dates, deadlines, ETAs, or time estimates. If a teammate mentioned a date, ignore it — it was hallucinated. You have no calendar awareness between invocations.
-
-**VERIFY BEFORE PROPAGATING.** Before acting on any claim from a teammate (file exists, bug found, task done), run a tool call to verify it yourself. Never forward an unverified claim. If you can't verify it, say so — do not assume it's true.
-
-**NO ACK RESPONSES.** Never send acknowledgment-only messages ('Got it', 'Understood', 'Standing by'). Either do the work immediately and report results, or stay silent. Ack loops waste cycles and spread hallucinations.
-
-**IF IT DOESN'T EXIST, SAY SO.** If asked to work on something that doesn't exist (file, feature, task), stop, report what you actually found, and ask for clarification. Do not invent context.
-
-Act on the new messages above. Use Bash/Read/Write/Edit to do your actual work.
-
-When done, your FINAL output must be ONLY a JSON object (no other text before or after):
-
-{{
-  \"response\": \"your reply to the sender (string or null)\",
-  \"delegate\": [],
-  \"messages\": null,
-  \"completed_tasks\": [],
-  \"continue\": false,
-  \"state_update\": {{\"status\": \"what you're doing now\"}}
-}}
-
-Do NOT run any `collab` command in this session — the harness manages collab state and the relevant env vars are unset here. Use Bash/Read/Write/Edit for actual work; emit collab actions via the JSON object above.",
-                self.instance_id,
-                self.get_role(),
-                history_str,
-                messages.len(),
-                msg_lines
-            ));
-        }
-
-        // Full prompt — complete context
         let state = self.load_state();
         let state_str = serde_json::to_string_pretty(&state).unwrap_or_else(|_| "No previous state.".to_string());
 
@@ -799,20 +787,20 @@ Do NOT run any `collab` command in this session — the harness manages collab s
             Err(_) => String::new(),
         };
 
+        // Prompt layout is deliberately "stable block first, dynamic block
+        // last" so claude's prompt cache has the longest possible common
+        // prefix across calls. Anything that changes per call (state, todos,
+        // history, new messages) goes at the END — the cache breaks at the
+        // first byte of difference, so putting rules / schema / identity
+        // lines up front means all of that caches.
+        //
+        // Per-worker identity is cacheable across THAT worker's calls;
+        // teammates list rotates rarely. The "You are @X" / "Your team:" /
+        // rules / schema block totals ~2–3KB and should all cache.
         Ok(format!(
-            "You are @{}. Role: {}
+            "You are @{instance_id}. Role: {role}
 
-{}
-
-Previous state:
-{}
-
-{}
-
-{}
-New messages ({}):
-{}
-
+{teammates}
 ## CRITICAL RULES (absolute — no exceptions)
 
 **NO DATES OR TIMES.** Never mention dates, deadlines, ETAs, or time estimates in any message or response. If a teammate mentioned a date (e.g. 'EOD April 17th', 'by Thursday'), ignore it — it was hallucinated. You have no calendar awareness between invocations.
@@ -823,7 +811,9 @@ New messages ({}):
 
 **IF IT DOESN'T EXIST, SAY SO.** If asked to work on something that doesn't exist (a file, a feature, a task), stop, report what you actually found with a tool call, and ask for clarification. Do not invent context.
 
-Act on the new messages above. Use Bash/Read/Write/Edit to do your actual work (coding, research, testing).
+**NEVER NARRATE DELEGATION.** If you write \"I've delegated to @X\", \"I'll send this to @Y\", \"assigned to @Z\" or similar in your response, you MUST have a matching entry in the delegate[] array. Claiming you delegated when delegate[] is empty is a lie — the recipient never gets a todo, and your sender thinks it was handled. Either fill delegate[] or don't claim to delegate.
+
+## Output format
 
 When done, your FINAL output must be ONLY a JSON object (no other text before or after):
 
@@ -838,37 +828,43 @@ When done, your FINAL output must be ONLY a JSON object (no other text before or
 
 Fields:
 - response: reply back to whoever messaged you
-- delegate: assign tasks to ANY instance (teammates, humans, anyone) — creates a persistent todo and pings them. If someone messages you asking for something and you need THEM to act, delegate back to THEM — not to a random teammate. IMPORTANT: do NOT put task assignments in response or messages, those are ephemeral and will be lost on context reset. The task description MUST be self-contained: include all facts, URLs, decisions, and context the recipient needs — they will NOT see the original messages that led to this task
+- delegate: the ONLY way to assign work to another worker. Each entry becomes a persistent todo on the server. Writing about delegation in `response` or `messages` does NOT assign anything — if you want someone to act, you MUST fill delegate[] or nothing happens. If someone messages you asking for something and you need THEM to act, delegate back to THEM — not to a random teammate. The task description must be self-contained: facts, URLs, decisions, context — the recipient will NOT see the messages that led to this delegation.
 - messages: null always. Never send status updates, confirmations, or narration. Use delegate for work assignments. If you have nothing to assign, omit this field entirely.
 - completed_tasks: task hashes you finished — marks done and routes to downstream workers (optional)
 - continue: true to keep working autonomously, false when blocked or done
 - state_update: persist state for next invocation. Include \"status\" to update your roster presence
 
-Do NOT run any `collab` command in this session — the harness manages collab state and the relevant env vars are unset here. Use Bash/Read/Write/Edit for actual work; emit collab actions via the JSON object above.",
-            self.instance_id,
-            self.get_role(),
-            teammates_str,
-            state_str,
-            todos_str,
-            history_str,
-            messages.len(),
-            msg_lines
+Do NOT run any `collab` command in this session — the harness manages collab state and the relevant env vars are unset here. Use Bash/Read/Write/Edit for actual work; emit collab actions via the JSON object above.
+
+═══ Session context (varies per call — everything above this line is cacheable) ═══
+
+Previous state:
+{state}
+
+{todos}
+{history}New messages ({n}):
+{msg_lines}
+
+Act on the new messages above. Use Bash/Read/Write/Edit to do your actual work (coding, research, testing).",
+            instance_id = self.instance_id,
+            role = self.get_role(),
+            teammates = teammates_str,
+            state = state_str,
+            todos = todos_str,
+            history = history_str,
+            n = messages.len(),
+            msg_lines = msg_lines
         ))
     }
 
     /// Returns Ok(true) if the worker set continue: true, Ok(false) otherwise.
-    async fn spawn_cli(&self, messages: &[Message], full_context: bool) -> Result<bool> {
+    async fn spawn_cli(&self, messages: &[Message]) -> Result<bool> {
         let start = std::time::Instant::now();
-        let tier = if full_context { PromptTier::Full } else { PromptTier::Light };
+        let tier = PromptTier::Full;
 
-        let prompt = self.build_prompt(messages, full_context).await?;
+        let prompt = self.build_prompt(messages).await?;
 
-        // Select template: light tier uses cli_template_light if available
-        let active_template = if !full_context {
-            self.cli_template_light.as_deref().unwrap_or(&self.cli_template)
-        } else {
-            &self.cli_template
-        };
+        let active_template = &self.cli_template;
 
         // Validate: error if template uses {model} but no model is set
         if active_template.contains("{model}") && self.model.is_empty() {
@@ -996,28 +992,36 @@ Do NOT run any `collab` command in this session — the harness manages collab s
 
         let raw_stdout = String::from_utf8_lossy(&output.stdout);
 
-        // For claude CLI: unwrap --output-format json envelope to get real token counts and cost
-        let (stdout, real_input_tokens, real_output_tokens, cost_usd) = if is_claude_cli {
+        // For claude CLI: unwrap --output-format json envelope to get real
+        // token counts and cost. Break the three input buckets apart so the
+        // usage report can expose cache hit rate to the user — they're what
+        // tell us whether prompt caching is actually firing.
+        //
+        //   input_tokens:               new tokens the API saw for the first time
+        //   cache_creation_input_tokens: tokens that got written to cache this call
+        //   cache_read_input_tokens:     tokens served from cache (the cheap ones)
+        let (stdout, real_input_tokens, cache_creation_tokens, cache_read_tokens,
+             real_output_tokens, cost_usd) = if is_claude_cli {
             match serde_json::from_str::<serde_json::Value>(&raw_stdout) {
                 Ok(v) => {
                     let inner = v.get("result")
                         .and_then(|r| r.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let input_tok = v.pointer("/usage/input_tokens").and_then(|t| t.as_u64()).unwrap_or(0)
-                        + v.pointer("/usage/cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0)
-                        + v.pointer("/usage/cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let input_tok = v.pointer("/usage/input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let cache_creation = v.pointer("/usage/cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let cache_read = v.pointer("/usage/cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                     let output_tok = v.pointer("/usage/output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                     let cost = v.get("total_cost_usd").and_then(|c| c.as_f64());
-                    (std::borrow::Cow::Owned(inner), input_tok, output_tok, cost)
+                    (std::borrow::Cow::Owned(inner), input_tok, cache_creation, cache_read, output_tok, cost)
                 }
                 Err(e) => {
                     self.log_error(&format!("Failed to parse claude JSON envelope: {e}"));
-                    (raw_stdout, 0u64, 0u64, None)
+                    (raw_stdout, 0u64, 0u64, 0u64, 0u64, None)
                 }
             }
         } else {
-            (raw_stdout, 0u64, 0u64, None)
+            (raw_stdout, 0u64, 0u64, 0u64, 0u64, None)
         };
 
         let duration = start.elapsed().as_secs();
@@ -1025,7 +1029,64 @@ Do NOT run any `collab` command in this session — the harness manages collab s
         // Parse structured output
         let mut did_continue = false;
         let mut debug_was_dumped = false;
-        if let Some(collab_output) = self.parse_collab_output(&stdout) {
+        if let Some(mut collab_output) = self.parse_collab_output(&stdout) {
+            // Known teammates for delegate-target validation + auto-extraction.
+            let known_teammates: std::collections::HashSet<String> = self.teammates.iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+
+            // Guardrail: workers repeatedly claim \"I've delegated\" / \"delegating
+            // to @X\" in their response text but leave delegate[] empty. The
+            // prompt explicitly forbids this, and models still do it — the
+            // failure is stable enough that the only remedy left is to make
+            // code enforce what the prompt can only ask for.
+            //
+            // Detection: response mentions delegation AND delegate[] is empty.
+            // Resolution: if the response has exactly one @mention that's a
+            // known teammate, synthesize a DelegateTask with the full
+            // response as the task body (self-contained context). Otherwise
+            // scrub the lie from the response so downstream readers aren't
+            // misled. Either way, log so the human can see it happened.
+            let delegation_claim_re = regex::Regex::new(
+                r"(?i)\b(I(?:'ve|\s+have)?\s+(?:delegated|assigned|sent)|I(?:'ll|\s+will)\s+(?:delegate|assign|send)|delegating|delegated|assigned|assigning)\b"
+            ).unwrap();
+            let mention_re = regex::Regex::new(r"@(\w+)").unwrap();
+
+            if collab_output.delegate.is_empty() {
+                if let Some(response) = collab_output.response.as_ref() {
+                    if delegation_claim_re.is_match(response) {
+                        let candidates: Vec<String> = mention_re.captures_iter(response)
+                            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+                            .filter(|name| known_teammates.contains(name) && name != &self.instance_id)
+                            .collect::<std::collections::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        if candidates.len() == 1 {
+                            let target = candidates.into_iter().next().unwrap();
+                            self.log(&format!(
+                                "auto-extracting delegation: response claimed delegation with no delegate[] entry; synthesizing @{} with response as task body",
+                                target
+                            ));
+                            collab_output.delegate.push(DelegateTask {
+                                to: target,
+                                task: response.clone(),
+                            });
+                        } else {
+                            self.log(&format!(
+                                "scrubbing phantom delegation claim from response ({} unambiguous @-mentions of known teammates); the model lied about delegating",
+                                candidates.len()
+                            ));
+                            // Replace the response with a truthful note so the
+                            // sender knows the claimed delegation didn't happen
+                            // rather than being told it did.
+                            collab_output.response = Some(
+                                "(worker claimed to delegate but couldn't — no unambiguous target found; please restate what you need)".to_string()
+                            );
+                        }
+                    }
+                }
+            }
+
             // Build set of delegate targets to avoid duplicate messages
             let delegated_to: std::collections::HashSet<String> = collab_output.delegate.iter()
                 .map(|t| t.to.trim_start_matches('@').to_string())
@@ -1058,9 +1119,8 @@ Do NOT run any `collab` command in this session — the harness manages collab s
             // teammates freely and led to the d4dataminer → @webdev incident.
             // Self-delegation and the reserved broadcast target `@all` stay
             // allowed so a worker can queue work for itself or ping everyone.
-            let known_teammates: std::collections::HashSet<String> = self.teammates.iter()
-                .map(|(name, _)| name.clone())
-                .collect();
+            // (known_teammates set was built above for the delegation-claim
+            // guardrail — reused here.)
             for task in &collab_output.delegate {
                 let to = task.to.trim_start_matches('@');
                 if !is_allowed_delegate_target(to, &self.instance_id, &known_teammates) {
@@ -1102,7 +1162,13 @@ Do NOT run any `collab` command in this session — the harness manages collab s
             // Mark completed tasks and auto-route to downstream workers.
             // Only route pipeline if tasks were *actually* confirmed done by the server —
             // prevents hallucinated hashes from triggering downstream work.
-            let max_completions = 5;
+            //
+            // Cap exists to catch a worker that hallucinates bulk completions
+            // ("I finished all 50 tasks you had!"). A real backlog plus some
+            // follow-on work can legitimately hit ~10–15 completions in one
+            // turn, so 20 is a reasonable ceiling — still an obvious outlier
+            // when tripped.
+            let max_completions = 20;
             if collab_output.completed_tasks.len() > max_completions {
                 self.log_error(&format!(
                     "Worker tried to mark {} tasks done in one call (cap: {}) — processing first {}, ignoring rest",
@@ -1198,13 +1264,21 @@ Do NOT run any `collab` command in this session — the harness manages collab s
         }
 
         // Token usage — real counts from claude JSON envelope, estimates for other CLIs
-        let (log_input_tokens, log_output_tokens) = if is_claude_cli {
-            (real_input_tokens, real_output_tokens)
+        let (log_input_tokens, log_cache_creation, log_cache_read, log_output_tokens) = if is_claude_cli {
+            (real_input_tokens, cache_creation_tokens, cache_read_tokens, real_output_tokens)
         } else {
-            (prompt.len() as u64 / 4, stdout.len() as u64 / 4)
+            (prompt.len() as u64 / 4, 0, 0, stdout.len() as u64 / 4)
         };
         let cost_str = cost_usd.map(|c| format!(", ${:.4}", c)).unwrap_or_default();
-        self.log(&format!("done — {}s, {}+{} tokens{}", duration, log_input_tokens, log_output_tokens, cost_str));
+        // Fold cache activity into the log line so we can eyeball hit rate
+        // without hitting the /usage endpoint. Only printed when non-zero.
+        let cache_str = if log_cache_creation + log_cache_read > 0 {
+            format!(" (cache write {}, read {})", log_cache_creation, log_cache_read)
+        } else {
+            String::new()
+        };
+        self.log(&format!("done — {}s, {}+{} tokens{}{}",
+            duration, log_input_tokens, log_output_tokens, cache_str, cost_str));
 
         // Report usage delta to server — authoritative running totals.
         let cli_name = self.cli_template.split_whitespace().next().unwrap_or("unknown");
@@ -1213,6 +1287,8 @@ Do NOT run any `collab` command in this session — the harness manages collab s
             worker: &self.instance_id,
             duration_secs: duration,
             input_tokens: log_input_tokens,
+            cache_creation_tokens: log_cache_creation,
+            cache_read_tokens: log_cache_read,
             output_tokens: log_output_tokens,
             tier: &tier_str,
             cost_usd,
@@ -1670,7 +1746,6 @@ mod tests {
 /// - COLLAB_INSTANCE/SERVER/TOKEN leaking into the subprocess
 /// - Spawn failures producing no diagnostic artifact
 /// - CLI timeouts producing no diagnostic artifact (and not killing the child)
-/// - Light tier prompts being amnesic on short conversational replies
 /// - Delegate target also receiving a duplicate `response` message
 #[cfg(test)]
 mod integration {
@@ -1793,7 +1868,6 @@ mod integration {
             workdir.to_path_buf(),
             String::new(),
             Some(cli_template.into()),
-            None,
             true,
             10,
             vec![],
@@ -1822,7 +1896,7 @@ mod integration {
         let fake = FakeApi::new();
         let harness = make_harness(&script, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
 
-        let did_continue = harness.spawn_cli(&[user_msg("hi")], false).await.unwrap();
+        let did_continue = harness.spawn_cli(&[user_msg("hi")]).await.unwrap();
 
         assert!(!did_continue);
         assert_eq!(fake.added_messages(), vec![("human".into(), "hello".into())]);
@@ -1842,7 +1916,7 @@ mod integration {
         let fake = FakeApi::new();
         let harness = make_harness(&script, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
 
-        let _ = harness.spawn_cli(&[user_msg("hi")], false).await;
+        let _ = harness.spawn_cli(&[user_msg("hi")]).await;
 
         let path = debug_path(&id);
         assert!(Path::new(&path).exists(),
@@ -1865,11 +1939,11 @@ mod integration {
         let path = debug_path(&id);
 
         let h_bad = make_harness(&bad, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
-        let _ = h_bad.spawn_cli(&[user_msg("hi")], false).await;
+        let _ = h_bad.spawn_cli(&[user_msg("hi")]).await;
         assert!(Path::new(&path).exists(), "first call should leave debug");
 
         let h_good = make_harness(&good, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
-        let _ = h_good.spawn_cli(&[user_msg("again")], false).await;
+        let _ = h_good.spawn_cli(&[user_msg("again")]).await;
         assert!(!Path::new(&path).exists(),
             "successful follow-up should clear the stale debug file");
     }
@@ -1886,7 +1960,7 @@ mod integration {
         let template = format!("MY_TEST_VAR=hello-from-env {}", script);
         let harness = make_harness(&template, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
 
-        harness.spawn_cli(&[user_msg("go")], false).await.unwrap();
+        harness.spawn_cli(&[user_msg("go")]).await.unwrap();
 
         let sent = fake.added_messages();
         assert_eq!(sent.len(), 1);
@@ -1912,7 +1986,7 @@ mod integration {
         );
         let harness = make_harness(&template, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
 
-        harness.spawn_cli(&[user_msg("go")], false).await.unwrap();
+        harness.spawn_cli(&[user_msg("go")]).await.unwrap();
 
         let sent = fake.added_messages();
         assert_eq!(sent.len(), 1);
@@ -1928,7 +2002,7 @@ mod integration {
         let fake = FakeApi::new();
         let harness = make_harness("/no/such/binary {prompt}", dir.path(), fake as Arc<dyn CollabApi>, &id);
 
-        let result = harness.spawn_cli(&[user_msg("hi")], false).await;
+        let result = harness.spawn_cli(&[user_msg("hi")]).await;
 
         assert!(result.is_err());
         let path = debug_path(&id);
@@ -1953,7 +2027,7 @@ mod integration {
         let harness = make_harness(&script, dir.path(), fake as Arc<dyn CollabApi>, &id)
             .with_cli_timeout_secs(1);
 
-        let result = harness.spawn_cli(&[user_msg("hi")], false).await;
+        let result = harness.spawn_cli(&[user_msg("hi")]).await;
 
         assert!(result.is_err(), "should error on timeout");
         let path = debug_path(&id);
@@ -1968,26 +2042,7 @@ mod integration {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// REGRESSION: Light tier was strip-everything-but-the-current-message, causing
-    /// PM to ask "what was I asking about?" on conversational short replies because
-    /// her own prior outgoing message wasn't visible.
-    #[tokio::test]
-    async fn build_prompt_light_includes_recent_history() {
-        let id = unique_id("light-history");
-        let dir = TempDir::new().unwrap();
-        let fake = FakeApi::new();
-        fake.push_history(&id, "human", "what is the actual deadline?");
-        let harness = make_harness("noop", dir.path(), fake as Arc<dyn CollabApi>, &id);
-
-        let prompt = harness.build_prompt(&[user_msg("how TF do I know?")], false).await.unwrap();
-
-        assert!(prompt.contains("Recent history"),
-            "Light prompt must include a recent-history window (regression: amnesia on short replies)");
-        assert!(prompt.contains("what is the actual deadline?"),
-            "history entry must appear in the prompt");
-    }
-
-    /// Delegate target should not also receive a duplicate `response` message.
+/// Delegate target should not also receive a duplicate `response` message.
     /// The delegate handoff already creates a todo + notification; sending the
     /// `response` field on top would double-message them.
     #[tokio::test]
@@ -1999,7 +2054,7 @@ mod integration {
         let fake = FakeApi::new();
         let harness = make_harness(&script, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id);
 
-        harness.spawn_cli(&[user_msg("please")], false).await.unwrap();
+        harness.spawn_cli(&[user_msg("please")]).await.unwrap();
 
         // The "response" field text should not be sent to @human as a separate message
         // because @human is already a delegate target.

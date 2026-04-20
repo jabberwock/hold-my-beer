@@ -561,7 +561,7 @@ async fn main() -> Result<()> {
         let probe_dir = workdir
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let (hands_off_to, teammates, manifest_cli_template, manifest_cli_template_light,
+        let (hands_off_to, teammates, manifest_cli_template,
              manifest_codebase, manifest_model) =
             resolve_worker_manifest(&probe_dir, &instance_id);
 
@@ -655,7 +655,6 @@ async fn main() -> Result<()> {
             resolved_workdir,
             resolved_model,
             resolved_cli_template,
-            manifest_cli_template_light,
             auto_reply,
             batch_wait,
             hands_off_to,
@@ -1142,7 +1141,6 @@ fn load_lifecycle_manifest() -> Result<(Vec<lifecycle::WorkerManifestEntry>, std
             .iter()
             .map(|w| {
                 let cli_tmpl = cfg.resolved_cli_template(w);
-                let cli_tmpl_light = cfg.resolved_cli_template_light(w);
                 let model = cfg.resolved_model(w).unwrap_or_default();
                 lifecycle::WorkerManifestEntry {
                     name: w.name.clone(),
@@ -1155,7 +1153,6 @@ fn load_lifecycle_manifest() -> Result<(Vec<lifecycle::WorkerManifestEntry>, std
                     output_dir: w.codebase_path.clone(),
                     shared_data_dir: cfg.shared_data_dir.clone(),
                     cli_template: cli_tmpl,
-                    cli_template_light: cli_tmpl_light,
                     hands_off_to: w.hands_off_to.clone(),
                 }
             })
@@ -1532,7 +1529,6 @@ struct WorkerManifestLookup {
     hands_off_to: Vec<String>,
     teammates: Vec<(String, String)>,
     cli_template: Option<String>,
-    cli_template_light: Option<String>,
     codebase_path: Option<String>,
     model: Option<String>,
 }
@@ -1545,14 +1541,13 @@ struct WorkerManifestLookup {
 fn resolve_worker_manifest(
     workdir: &std::path::Path,
     instance_id: &str,
-) -> (Vec<String>, Vec<(String, String)>, Option<String>, Option<String>,
+) -> (Vec<String>, Vec<(String, String)>, Option<String>,
       Option<String>, Option<String>) {
     let lookup = resolve_worker_manifest_inner(workdir, instance_id);
     (
         lookup.hands_off_to,
         lookup.teammates,
         lookup.cli_template,
-        lookup.cli_template_light,
         lookup.codebase_path,
         lookup.model,
     )
@@ -1570,7 +1565,6 @@ fn resolve_worker_manifest_inner(
                 let me = cfg.workers.iter().find(|w| w.name == instance_id);
                 let hands_off = me.map(|w| w.hands_off_to.clone()).unwrap_or_default();
                 let tmpl = me.and_then(|w| cfg.resolved_cli_template(w));
-                let tmpl_light = me.and_then(|w| cfg.resolved_cli_template_light(w));
                 let codebase = me.map(|w| w.codebase_path.clone());
                 let model = me.and_then(|w| cfg.resolved_model(w));
                 let teammates: Vec<(String, String)> = cfg
@@ -1582,7 +1576,6 @@ fn resolve_worker_manifest_inner(
                     hands_off_to: hands_off,
                     teammates,
                     cli_template: tmpl,
-                    cli_template_light: tmpl_light,
                     codebase_path: codebase,
                     model,
                 };
@@ -1602,7 +1595,6 @@ fn resolve_worker_manifest_inner(
         hands_off_to: vec![],
         teammates: vec![],
         cli_template: None,
-        cli_template_light: None,
         codebase_path: None,
         model: None,
     };
@@ -1612,7 +1604,6 @@ fn resolve_worker_manifest_inner(
                 let entry = manifest.iter().find(|w| w.name == instance_id);
                 let hands_off = entry.map(|w| w.hands_off_to.clone()).unwrap_or_default();
                 let tmpl = entry.and_then(|w| w.cli_template.clone());
-                let tmpl_light = entry.and_then(|w| w.cli_template_light.clone());
                 let codebase = entry.map(|w| w.codebase_path.clone());
                 let model = entry.map(|w| w.model.clone()).filter(|s| !s.is_empty());
                 let team: Vec<(String, String)> = manifest
@@ -1623,7 +1614,6 @@ fn resolve_worker_manifest_inner(
                     hands_off_to: hands_off,
                     teammates: team,
                     cli_template: tmpl,
-                    cli_template_light: tmpl_light,
                     codebase_path: codebase,
                     model,
                 }
