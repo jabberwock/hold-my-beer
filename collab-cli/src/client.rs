@@ -1040,10 +1040,10 @@ impl CollabClient {
         println!("→ @{}  {}", todo.instance, &todo.hash[..7]);
         println!("  {}", todo.description);
 
-        // Wake the worker — send a ping so it picks up the new task immediately
-        let ping = format!("📋 New task assigned: {}", todo.description);
-        let _ = self.add_message(&todo.instance, &ping, None).await;
-
+        // Do NOT post a "new task assigned" notification here. The server
+        // inserts one atomically with the todo (see collab-server:create_todo)
+        // and broadcasts it via SSE — doing it here too produced a visible
+        // duplicate, once without the emoji (server) and once with (client).
         Ok(())
     }
 

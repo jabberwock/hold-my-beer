@@ -1713,8 +1713,10 @@ async fn create_todo(
         completed_at: None,
     };
 
-    // Wake the worker via SSE — send a ping message so it picks up the task immediately
-    let ping_content = format!("New task assigned: {}", payload.description);
+    // Wake the worker via SSE — send a ping message so it picks up the task
+    // immediately. This is the *only* delegation notification; the CLI's
+    // todo_add used to post its own too, which produced a visible duplicate.
+    let ping_content = format!("📋 New task assigned: {}", payload.description);
     let ping_id = Uuid::new_v4().to_string();
     let ping_ts = Utc::now();
     let mut ping_hasher = Sha1::new();

@@ -1110,7 +1110,8 @@ Act on the new messages above. Use Bash/Read/Write/Edit to do your actual work (
                 }
             }
 
-            // Delegate tasks — create todo (todo_add already sends a ping message).
+            // Delegate tasks — create todo (server inserts the "📋 New task assigned"
+            // notification atomically with the todo; no ping needed from here).
             // Validate target against known teammates to prevent hallucinated
             // delegations (ghost-worker todos that pile up on the server).
             //
