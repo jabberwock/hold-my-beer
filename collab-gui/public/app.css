@@ -362,6 +362,16 @@
     .roster-name { font-weight: 600; font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .roster-role { font-size: 10px; color: var(--dim-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .roster-count { font-size: 10px; color: var(--dim); font-family: 'Fira Code', monospace; }
+    .roster-kick {
+      background: transparent; border: 1px solid var(--border);
+      color: var(--dim); font-size: 11px; line-height: 1;
+      padding: 3px 6px; border-radius: 4px;
+      cursor: pointer; transition: all var(--t);
+      opacity: 0; /* only reveal on hover to keep the roster uncluttered */
+    }
+    .roster-item:hover .roster-kick { opacity: 1; }
+    .roster-kick:hover { background: var(--surface); color: var(--text); border-color: var(--accent); }
+    .roster-kick:disabled { opacity: 0.4; cursor: wait; }
 
     .roster-footer {
       padding: 10px 10px;

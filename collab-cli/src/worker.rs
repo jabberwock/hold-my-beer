@@ -18,6 +18,12 @@ const ACK_START_PATTERN: &str = r"(?i)^(@[\w-]+[:,]?\s+)*\s*(acknowledged?|ackno
 /// Messages opening with an ack phrase AND shorter than this are swallowed.
 /// Anything longer is assumed to carry real content after the opener.
 const ACK_MAX_LEN: usize = 300;
+/// Prefix the harness uses on post-CLI self-kicks ("you still have N pending
+/// tasks"). It's a distinct marker so the batch loop can tell an auto-kick
+/// apart from a boot-kick / human message / teammate delegation — and, via
+/// that, (a) reset the auto-kick chain count when a real external arrives,
+/// and (b) cap how many times an auto-kick can chain another auto-kick.
+const AUTO_KICK_MARKER: &str = "[auto-kick] pending tasks";
 pub const DEFAULT_CLI_TEMPLATE: &str = "claude -p {prompt} --model {model} --allowedTools Bash,Read,Write,Edit";
 
 /// Two dispatches: either the Rust harness answers directly (pings, acks —
@@ -276,6 +282,14 @@ impl WorkerHarness {
         let cli_timeout_secs = self.cli_timeout_secs;
 
         let max_self_kicks: u32 = 3;
+        // Max auto-kicks triggered by a single external message. Each external
+        // delegation/reply fires one CLI call; if that returns continue=false
+        // and there are still pending todos, the harness auto-kicks — up to
+        // this cap — so a chatty teammate delivering one task can trigger
+        // work on a short backlog without every subsequent task needing
+        // its own external nudge. The counter resets whenever a real
+        // external message (not a sender="system" auto-kick) arrives.
+        const MAX_AUTO_KICKS: u32 = 3;
 
         // Serializes CLI invocations — only one claude process at a time per worker,
         // but the batch loop itself is never blocked waiting for claude to finish.
@@ -311,6 +325,10 @@ impl WorkerHarness {
 
                     tokio::spawn(async move {
                         let mut consecutive_kicks: u32 = 0;
+                        // Counts auto-kicks chained off a single external message.
+                        // Resets whenever a real external message arrives; stops
+                        // chaining at MAX_AUTO_KICKS (see above).
+                        let mut consecutive_auto_kicks: u32 = 0;
                         loop {
                 sleep(Duration::from_millis(batch_wait_ms)).await;
 
@@ -352,6 +370,23 @@ impl WorkerHarness {
                 } else {
                     consecutive_kicks = 0;
                 }
+
+                // Track auto-kick chains. An auto-kick is a sender="system"
+                // message whose content starts with AUTO_KICK_MARKER. A real
+                // external message (anyone else — human, teammate) resets the
+                // chain count, so the next backlog gets a fresh MAX_AUTO_KICKS
+                // budget. This is checked below when deciding whether to
+                // queue another auto-kick.
+                let is_auto_kick_batch = messages.iter().any(|m|
+                    m.sender == "system" && m.content.starts_with(AUTO_KICK_MARKER)
+                );
+                let has_real_external = has_external && !is_auto_kick_batch;
+                if is_auto_kick_batch {
+                    consecutive_auto_kicks += 1;
+                } else if has_real_external {
+                    consecutive_auto_kicks = 0;
+                }
+                let auto_kicks_so_far = consecutive_auto_kicks;
 
                 let harness = WorkerHarness {
                     client: client.clone(),
@@ -430,19 +465,24 @@ impl WorkerHarness {
                                 let _ = harness.client.heartbeat(Some(&role)).await;
                             }
 
-                            // Auto-kick if worker has pending todos but didn't self-continue.
-                            // Skip if this batch was itself an auto-kick (avoid kick→kick loops).
+                            // Auto-kick if worker has pending todos and didn't
+                            // self-continue. Capped at MAX_AUTO_KICKS chained
+                            // off a single external message — so one external
+                            // delegation can drive up to MAX_AUTO_KICKS+1 CLI
+                            // calls (the original + chained auto-kicks) against
+                            // the backlog, but then the worker stops until
+                            // someone new nudges it. Critical invariant: idle
+                            // workers (no external activity) must NOT burn
+                            // tokens — the tool ships with "idle = free" as a
+                            // hard rule.
                             //
-                            // The kick is queued directly as a sender="system" message rather
-                            // than posted through add_message — round-tripping through the
-                            // server would stamp sender=instance_id, which the batch loop
-                            // strips at line 356 as a self-message, and the kick would be
-                            // silently eaten. Same trap the boot-kick hit (see ~line 636).
-                            const AUTO_KICK_MARKER: &str = "[auto-kick] pending tasks";
-                            let was_auto_kick = messages.iter().any(|m|
-                                m.sender == "system" && m.content.starts_with(AUTO_KICK_MARKER)
-                            );
-                            if !worker_continued && !was_auto_kick {
+                            // The kick is queued directly as a sender="system"
+                            // message rather than posted through add_message —
+                            // round-tripping through the server would stamp
+                            // sender=instance_id, which the batch loop strips
+                            // as a self-message, and the kick would be silently
+                            // eaten.
+                            if !worker_continued && auto_kicks_so_far < MAX_AUTO_KICKS {
                                 if let Ok(todos) = harness.client.fetch_todos(&harness.instance_id).await {
                                     if !todos.is_empty() {
                                         let mut q = queue.lock().await;

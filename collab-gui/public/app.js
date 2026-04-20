@@ -1078,8 +1078,56 @@ function renderRoster(workers) {
     count.textContent = w.message_count || '';
     item.appendChild(count);
 
+    // Manual kick button — only for workers that aren't us. Sends a tiny
+    // message that the worker harness treats like any other external
+    // delivery, triggering one CLI call against its backlog. Exists because
+    // we deliberately don't idle-kick (idle must stay free), so a stalled
+    // worker with pending todos needs a human poke.
+    if (w.instance_id !== (cfg.identity || 'human')) {
+      const kick = document.createElement('button');
+      kick.type = 'button';
+      kick.className = 'roster-kick';
+      kick.textContent = '⚡';
+      kick.title = `Kick @${w.instance_id} — fires one CLI call against their pending todos`;
+      kick.addEventListener('click', (e) => {
+        e.stopPropagation();
+        kickWorker(w.instance_id, kick);
+      });
+      item.appendChild(kick);
+    }
+
     list.appendChild(item);
   });
+}
+
+async function kickWorker(instanceId, btn) {
+  if (!cfg.serverUrl || !cfg.token) { toast('Not connected', true); return; }
+  const sender = (cfg.identity || 'human').replace(/^@/, '');
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '…';
+  try {
+    const res = await fetch(`${cfg.serverUrl}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.token}` },
+      body: JSON.stringify({
+        sender,
+        recipient: instanceId,
+        content: 'Checking in — process any pending todos or reply with blockers.',
+        refs: [],
+      }),
+    });
+    if (res.ok) {
+      toast(`Kicked @${instanceId}`);
+    } else {
+      toast(`Kick failed: ${res.status}`, true);
+    }
+  } catch (e) {
+    toast(`Kick error: ${e}`, true);
+  } finally {
+    btn.textContent = origText;
+    btn.disabled = false;
+  }
 }
 
 // ── Todos ─────────────────────────────────────────────────────────────────────
