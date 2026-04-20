@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# llama-web — llama-server wrapper with native tool-calling (search + fetch + bash)
+# Uses OpenAI-compatible /v1/chat/completions with tools — works with llama-server
+#
+# Usage: llama-web -p "prompt" [--model MODEL] [--num-ctx N]
+
+set -euo pipefail
+
+MODEL="Qwen3.6-35B-A3B"
+PROMPT=""
+MAX_ROUNDS=10
+NUM_CTX="${LLAMA_NUM_CTX:-16384}"
+LLAMA_HOST="${LLAMA_HOST:-http://localhost:8084}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p) PROMPT="$2"; shift 2 ;;
+        --model) MODEL="$2"; shift 2 ;;
+        --num-ctx) NUM_CTX="$2"; shift 2 ;;
+        *) PROMPT="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROMPT" ]]; then
+    echo "Usage: llama-web -p \"prompt\" [--model MODEL] [--num-ctx N]" >&2
+    exit 1
+fi
+
+# --- Tool implementations ---
+
+do_search() {
+    local query="$1"
+    if command -v ddgr &>/dev/null; then
+        ddgr --np -n 5 --json "$query" 2>/dev/null | head -c 4000
+    else
+        local encoded
+        encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$query")
+        curl -s "https://lite.duckduckgo.com/lite/?q=$encoded" \
+            | python3 -c "
+import sys, re, html
+text = sys.stdin.read()
+results = re.findall(r'<a[^>]*href=\"(https?://[^\"]+)\"[^>]*>([^<]+)</a>', text)
+for url, title in results[:5]:
+    print(f'{html.unescape(title).strip()}: {url}')
+" 2>/dev/null | head -c 4000
+    fi
+}
+
+do_bash() {
+    local cmd="$1"
+    { bash -c "$cmd" 2>&1 || true; } | head -c 4000
+}
+
+do_fetch() {
+    local url="$1"
+    curl -sL --max-time 10 --max-filesize 1048576 "$url" 2>/dev/null \
+        | python3 -c "
+import sys, re, html
+raw = sys.stdin.read()
+text = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL)
+text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+text = re.sub(r'<[^>]+>', ' ', text)
+text = html.unescape(text)
+text = re.sub(r'\s+', ' ', text).strip()
+print(text[:6000])
+" 2>/dev/null
+}
+
+# --- Tool schema (OpenAI format) ---
+
+TOOLS='[
+  {
+    "type": "function",
+    "function": {
+      "name": "search",
+      "description": "Search the web for current information",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string", "description": "Search query"}
+        },
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "fetch",
+      "description": "Fetch and read the content of a URL",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "description": "URL to fetch"}
+        },
+        "required": ["url"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "Execute a shell command and return its output. Use this to run collab commands (e.g. collab todo add, collab add, collab list), read/write files, or perform any shell operation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "string", "description": "Shell command to execute"}
+        },
+        "required": ["command"]
+      }
+    }
+  }
+]'
+
+# --- Conversation state (JSON array of messages) ---
+
+messages=$(jq -n --arg content "$PROMPT" '[{"role":"user","content":$content}]')
+
+# --- Main loop ---
+
+for round in $(seq 1 $MAX_ROUNDS); do
+    raw=$(curl -s "$LLAMA_HOST/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n \
+            --arg model "$MODEL" \
+            --argjson messages "$messages" \
+            --argjson tools "$TOOLS" \
+            --argjson max_tokens "$NUM_CTX" \
+            '{model:$model, messages:$messages, tools:$tools, max_tokens:$max_tokens}')")
+
+    # Check for API error
+    if echo "$raw" | jq -e '.error' &>/dev/null; then
+        echo "llama-server error: $(echo "$raw" | jq -r '.error.message // .error')" >&2
+        exit 1
+    fi
+
+    # OpenAI format: choices[0].message
+    assistant_msg=$(echo "$raw" | jq '.choices[0].message')
+    tool_calls=$(echo "$assistant_msg" | jq '.tool_calls // []')
+    content=$(echo "$assistant_msg" | jq -r '.content // ""')
+
+    # No tool calls — we're done
+    if [[ "$(echo "$tool_calls" | jq 'length')" -eq 0 ]]; then
+        # If the prompt asks for JSON output, extract the JSON block from the response
+        if echo "$PROMPT" | grep -q '"response"'; then
+            json_block=$(echo "$content" | python3 -c "
+import sys, re, json
+text = sys.stdin.read()
+candidates = []
+candidates += re.findall(r'\{[\s\S]*\}', text)
+candidates += re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}', text)
+seen = set()
+for m in reversed(candidates):
+    if m in seen:
+        continue
+    seen.add(m)
+    try:
+        obj = json.loads(m)
+        if 'response' in obj or 'delegate' in obj or 'continue' in obj:
+            obj['messages'] = None
+            obj['continue'] = False
+            print(json.dumps(obj))
+            sys.exit(0)
+    except Exception:
+        pass
+print(json.dumps({'response': text.strip() or None, 'delegate': [], 'messages': None, 'completed_tasks': [], 'continue': False, 'state_update': {}}))
+" 2>/dev/null)
+            echo "$json_block" | tee -a /tmp/llama-web-debug.log
+        else
+            echo "$content"
+        fi
+        exit 0
+    fi
+
+    # Append assistant message to history (OpenAI format includes tool_calls in the message)
+    messages=$(echo "$messages" | jq --argjson msg "$assistant_msg" '. + [$msg]')
+
+    # Execute each tool call and append results
+    num_calls=$(echo "$tool_calls" | jq 'length')
+    for i in $(seq 0 $((num_calls - 1))); do
+        call=$(echo "$tool_calls" | jq ".[$i]")
+        name=$(echo "$call" | jq -r '.function.name')
+        args_raw=$(echo "$call" | jq -r '.function.arguments')
+        call_id=$(echo "$call" | jq -r '.id // "call_\($i)"')
+
+        # Arguments may be a JSON string or already an object
+        args=$(echo "$args_raw" | jq '.' 2>/dev/null || echo "$args_raw")
+
+        case "$name" in
+            search)
+                query=$(echo "$args" | jq -r '.query')
+                echo "[search: $query]" >&2
+                result=$(do_search "$query")
+                ;;
+            fetch)
+                url=$(echo "$args" | jq -r '.url')
+                echo "[fetch: $url]" >&2
+                result=$(do_fetch "$url")
+                ;;
+            bash)
+                cmd=$(echo "$args" | jq -r '.command')
+                echo "[bash: $cmd]" >&2
+                result=$(do_bash "$cmd")
+                ;;
+            *)
+                result="Unknown tool: $name"
+                ;;
+        esac
+
+        # OpenAI format: tool results use role "tool" with a tool_call_id
+        messages=$(echo "$messages" | jq \
+            --arg result "$result" \
+            --arg call_id "$call_id" \
+            '. + [{"role":"tool","content":$result,"tool_call_id":$call_id}]')
+    done
+done
+
+# Max rounds hit
+echo "$content" >&2
+echo "Warning: max rounds ($MAX_ROUNDS) reached" >&2
+echo "$content"
