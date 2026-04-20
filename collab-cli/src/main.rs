@@ -635,18 +635,41 @@ async fn main() -> Result<()> {
             }
         });
 
-        // Release the lease on graceful shutdown (Ctrl+C). We don't wait
-        // for the release to complete — a stale lease gets TTL'd anyway
-        // and we'd rather exit fast than block on a slow server.
+        // Release the lease AND clear the presence row on graceful shutdown
+        // (Ctrl+C / SIGTERM). Without the presence delete, `collab stop all`
+        // on Unix — which uses `killpg` → SIGTERM — leaves stale presence
+        // rows behind; if the GUI immediately relaunches, the preflight
+        // freshness check sees "heartbeated 5 seconds ago" and refuses to
+        // start the newly-spawned worker. SIGINT (Ctrl+C) hits the same
+        // cleanup path.
+        //
+        // Best-effort: we don't wait on the HTTP calls — a slow server
+        // would block exit, and stale presence also ages out naturally.
         let shutdown_client = client.clone();
         let shutdown_instance = instance_id.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                eprintln!("\n[{}] @{} releasing lease and exiting…",
-                    chrono::Utc::now().format("%H:%M:%S UTC"), shutdown_instance);
-                let _ = shutdown_client.release_lease(pid).await;
-                std::process::exit(0);
+            #[cfg(unix)]
+            let sigterm = async {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut s) = signal(SignalKind::terminate()) {
+                    s.recv().await;
+                }
+            };
+            #[cfg(not(unix))]
+            let sigterm = std::future::pending::<()>();
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm => {},
             }
+            eprintln!("\n[{}] @{} releasing lease + clearing presence and exiting…",
+                chrono::Utc::now().format("%H:%M:%S UTC"), shutdown_instance);
+            // Fire both in parallel so a slow server doesn't serialise the delays.
+            let _ = tokio::join!(
+                shutdown_client.release_lease(pid),
+                shutdown_client.delete_presence(),
+            );
+            std::process::exit(0);
         });
 
         let harness = worker::WorkerHarness::new(
@@ -950,6 +973,11 @@ async fn lifecycle_start(target: &str, server: &str, token: Option<&str>) -> Res
         _ => Vec::new(), // server unreachable — skip pre-flight, let the server-side lease catch it
     };
     let live_now = chrono::Utc::now();
+    // Workers heartbeat every 10s (see worker.rs HEARTBEAT_INTERVAL_SECS).
+    // 30s = 3 missed heartbeats → confidently dead, and tight enough that a
+    // Cmd+Q-then-relaunch cycle doesn't trip the guard on presence rows that
+    // ungracefully-killed workers left behind.
+    const LIVENESS_WINDOW_SECS: i64 = 30;
     let fresh_set: std::collections::HashSet<String> = live_roster
         .into_iter()
         .filter_map(|v| {
@@ -957,7 +985,7 @@ async fn lifecycle_start(target: &str, server: &str, token: Option<&str>) -> Res
             let last = v.get("last_seen")?.as_str()?;
             let parsed = chrono::DateTime::parse_from_rfc3339(last).ok()?;
             let delta = (live_now - parsed.with_timezone(&chrono::Utc)).num_seconds();
-            if delta < 60 { Some(id) } else { None }
+            if delta < LIVENESS_WINDOW_SECS { Some(id) } else { None }
         })
         .collect();
 
