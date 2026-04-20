@@ -26,6 +26,23 @@ const ACK_MAX_LEN: usize = 300;
 const AUTO_KICK_MARKER: &str = "[auto-kick] pending tasks";
 pub const DEFAULT_CLI_TEMPLATE: &str = "claude -p {prompt} --model {model} --allowedTools Bash,Read,Write,Edit";
 
+/// Truncate `s` to at most `max_bytes`, backing up to the nearest char
+/// boundary so we don't split a multi-byte UTF-8 sequence. Appends `…`
+/// when truncation happened. The naive `&s[..n]` panics if byte `n` lands
+/// inside a character (how we first hit this: a teammate's message with
+/// `×` produced `byte index 300 is not a char boundary; it is inside '×'
+/// (bytes 299..301)` in the history-formatting path).
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 /// Two dispatches: either the Rust harness answers directly (pings, acks —
 /// no claude call), or we build a full context prompt and spawn the CLI.
 ///
@@ -850,7 +867,7 @@ impl WorkerHarness {
                 } else {
                     let mut lines = String::from("Recent conversation history (for context — do NOT re-process these, only act on the new messages below):\n");
                     for m in &recent {
-                        let content = if m.content.len() > 300 { format!("{}…", &m.content[..300]) } else { m.content.clone() };
+                        let content = truncate_at_char_boundary(&m.content, 300);
                         lines.push_str(&format!("  @{} → @{}: {}\n", m.sender, m.recipient, content));
                     }
                     lines
@@ -1550,6 +1567,38 @@ pub(crate) fn is_allowed_delegate_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REGRESSION: `&s[..300]` panics when byte 300 lands inside a multi-byte
+    /// character. Live workers crashed on a teammate message containing `×`
+    /// (2-byte UTF-8) aligned so that byte 300 was byte-1-of-2.
+    #[test]
+    fn truncate_at_char_boundary_never_splits_multibyte() {
+        // Build a string where a × lands spanning byte 299..=300, so a naive
+        // `&s[..300]` would panic with "not a char boundary".
+        let mut s = String::new();
+        while s.len() < 299 { s.push('a'); }
+        s.push('×'); // 2 bytes — now at byte 299..=300
+        while s.len() < 400 { s.push('b'); }
+        let out = truncate_at_char_boundary(&s, 300);
+        // The × would've made 300 an illegal boundary; we should have backed
+        // up to 299 and appended the ellipsis.
+        assert!(out.ends_with('…'));
+        assert!(out.starts_with(&"a".repeat(299)));
+        assert!(!out.contains('×'), "partial × should not appear");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_passes_through_short_input() {
+        assert_eq!(truncate_at_char_boundary("hi", 300), "hi");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_handles_ascii() {
+        let s = "a".repeat(500);
+        let out = truncate_at_char_boundary(&s, 100);
+        assert_eq!(out.len(), 100 + "…".len());
+        assert!(out.ends_with('…'));
+    }
 
     #[test]
     fn allowed_delegate_accepts_self_broadcast_human_and_teammates() {
