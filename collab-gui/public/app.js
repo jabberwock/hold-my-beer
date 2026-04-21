@@ -127,15 +127,6 @@ function prefillWizard() {
   if (cfg.serverUrl)   document.getElementById('s1-url').value         = cfg.serverUrl;
   if (cfg.identity)    document.getElementById('s1-identity').value    = cfg.identity;
   if (cfg.projectDir)  document.getElementById('s2-dir').value         = cfg.projectDir;
-  // If there's a pre-existing team token, spring the advanced panel open
-  // so the human can see what's there instead of wondering why we didn't
-  // mint a fresh one.
-  if (cfg.token) {
-    const adv = document.getElementById('s1-advanced');
-    const btn = document.getElementById('btn-s1-adv-toggle');
-    if (adv) adv.hidden = false;
-    if (btn) btn.textContent = '▾ I already have a team token';
-  }
   renderWorkerCards();
 }
 
@@ -218,12 +209,16 @@ function step1Next() {
   goStep(2);
 }
 
-function toggleS1Advanced() {
-  const adv = document.getElementById('s1-advanced');
-  const btn = document.getElementById('btn-s1-adv-toggle');
-  if (!adv || !btn) return;
-  adv.hidden = !adv.hidden;
-  btn.textContent = (adv.hidden ? '▸' : '▾') + ' I already have a team token';
+// Mint a fresh 64-char hex secret into the Team Token field and reveal it
+// briefly so the user can eyeball / copy it before the field locks back to
+// password display. Mirrors the Paste button's 3-second reveal so users
+// aren't surprised by the type flip.
+function doGenerateTeamToken() {
+  const input = document.getElementById('s1-token');
+  if (!input) return;
+  input.value = generateHexToken(32);
+  input.type = 'text';
+  setTimeout(() => { input.type = 'password'; }, 3000);
 }
 
 // Mint a team token against the currently-running server. Called from
@@ -1059,6 +1054,8 @@ function renderRoster(workers) {
   const list = document.getElementById('roster-list');
   if (!list) return;
   list.innerHTML = '';
+  const countEl = document.getElementById('roster-header-count');
+  if (countEl) countEl.textContent = workers && workers.length ? String(workers.length) : '';
   if (!workers || workers.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'feed-empty feed-empty-sm';
@@ -1075,6 +1072,12 @@ function renderRoster(workers) {
     const item = document.createElement('div');
     item.className = 'roster-item';
     item.title = w.role || '';
+    item.dataset.worker = w.instance_id;
+    // Click opens the "is it working?" drill-in. Kick button below gets
+    // stopPropagation so the click doesn't bubble to this handler.
+    item.addEventListener('click', () => {
+      openWorkerGlance(w.instance_id, w.role || '');
+    });
 
     const dot = document.createElement('div');
     dot.className = 'roster-dot' + (isOnline ? ' online' : '');
@@ -1125,8 +1128,8 @@ function renderRoster(workers) {
 async function kickWorker(instanceId, btn) {
   if (!cfg.serverUrl || !cfg.token) { toast('Not connected', true); return; }
   const sender = (cfg.identity || 'human').replace(/^@/, '');
-  btn.disabled = true;
   const origText = btn.textContent;
+  btn.disabled = true;
   btn.textContent = '…';
   try {
     const res = await fetch(`${cfg.serverUrl}/messages`, {
@@ -1141,12 +1144,28 @@ async function kickWorker(instanceId, btn) {
     });
     if (res.ok) {
       toast(`Kicked @${instanceId}`);
+      // Visible win: hold the button at ✓ green and tint the row briefly so
+      // a hover-mouse-away user still sees that the kick fired. Revert
+      // after 1.2s so repeat kicks remain available.
+      btn.textContent = '✓';
+      btn.classList.add('ok');
+      const row = btn.closest('.roster-item');
+      if (row) {
+        row.classList.add('kicked');
+        setTimeout(() => row.classList.remove('kicked'), 1200);
+      }
+      setTimeout(() => {
+        btn.textContent = origText;
+        btn.classList.remove('ok');
+        btn.disabled = false;
+      }, 1200);
     } else {
       toast(`Kick failed: ${res.status}`, true);
+      btn.textContent = origText;
+      btn.disabled = false;
     }
   } catch (e) {
     toast(`Kick error: ${e}`, true);
-  } finally {
     btn.textContent = origText;
     btn.disabled = false;
   }
@@ -1197,6 +1216,7 @@ function renderTodos(todos) {
   todos.forEach(t => {
     const div = document.createElement('div');
     div.className = 'todo-item';
+    div.dataset.hash = t.hash || '';
 
     const byLine = document.createElement('div');
     byLine.className = 'todo-by';
@@ -1205,6 +1225,22 @@ function renderTodos(todos) {
     assignee.textContent = '@' + (t.instance || '');
     byLine.appendChild(assignee);
     byLine.appendChild(document.createTextNode(' · from ' + (t.assigned_by || '') + ' · ' + timeAgo(t.created_at)));
+
+    // ✓ button — marks the todo complete via PATCH /todos/:hash/done.
+    // Server treats "complete" as the only mutation (no separate delete),
+    // and a completed todo drops out of list_todos on the next fetch.
+    if (t.hash) {
+      const done = document.createElement('button');
+      done.className = 'todo-done';
+      done.title = 'Mark done — removes it from this worker\'s queue';
+      done.setAttribute('aria-label', 'Mark todo complete');
+      done.textContent = '✓';
+      done.addEventListener('click', (e) => {
+        e.stopPropagation();
+        markTodoDone(t.hash, div, done);
+      });
+      byLine.appendChild(done);
+    }
     div.appendChild(byLine);
 
     const descLine = document.createElement('div');
@@ -1214,6 +1250,37 @@ function renderTodos(todos) {
 
     list.appendChild(div);
   });
+}
+
+// Mark a todo complete. Optimistic: fade the row immediately so the click
+// feels instant; on server failure we restore it and toast the error.
+async function markTodoDone(hash, rowEl, btnEl) {
+  if (!cfg.serverUrl || !cfg.token) { toast('Not connected', true); return; }
+  if (!hash || hash.length < 4) return;
+  btnEl.disabled = true;
+  rowEl.classList.add('completing');
+  try {
+    const res = await fetch(`${cfg.serverUrl}/todos/${encodeURIComponent(hash)}/done`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${cfg.token}` },
+    });
+    if (res.ok) {
+      // Animate out, then refresh the list so other clients (and ourselves)
+      // pick up the new state from the server rather than guessing.
+      setTimeout(() => fetchTodos(), 220);
+    } else if (res.status === 409) {
+      // Already completed by someone else — refresh to drop the row.
+      fetchTodos();
+    } else {
+      rowEl.classList.remove('completing');
+      btnEl.disabled = false;
+      toast('Could not mark done: HTTP ' + res.status, true);
+    }
+  } catch (e) {
+    rowEl.classList.remove('completing');
+    btnEl.disabled = false;
+    toast('Could not mark done: ' + e, true);
+  }
 }
 
 function updateTodoWorkerSelect() {
@@ -1792,29 +1859,29 @@ async function registerPresence() {
 }
 
 // ── Panel toggles ─────────────────────────────────────────────────────────────
+// The three visibility panels (log, todos, usage) route through `prefs` so
+// that the topbar buttons and the accessibility panel stay in sync, and the
+// state survives a restart. applyPrefs() does the DOM work.
 function toggleServerLog() {
-  serverLogOpen = !serverLogOpen;
-  const panel = document.getElementById('server-log-panel');
-  if (panel) panel.classList.toggle('open', serverLogOpen);
+  prefs.panels.log = !prefs.panels.log;
+  savePrefs(); applyPrefs();
 }
 
 function toggleTodos() {
-  todosVisible = !todosVisible;
-  const panel = document.getElementById('todos-panel');
-  if (panel) panel.classList.toggle('collapsed', !todosVisible);
+  prefs.panels.todos = !prefs.panels.todos;
+  savePrefs(); applyPrefs();
 }
 
 // ── Usage panel ───────────────────────────────────────────────────────────────
 function toggleUsage() {
-  usageOpen = !usageOpen;
-  const panel = document.getElementById('usage-panel');
-  if (panel) panel.classList.toggle('open', usageOpen);
-  if (usageOpen) {
+  prefs.panels.usage = !prefs.panels.usage;
+  savePrefs(); applyPrefs();
+  // Poll only while the panel is visible.
+  if (prefs.panels.usage) {
     fetchUsage();
-    usageTimer = setInterval(fetchUsage, 10_000);
+    if (!usageTimer) usageTimer = setInterval(fetchUsage, 10_000);
   } else {
-    clearInterval(usageTimer);
-    usageTimer = null;
+    if (usageTimer) { clearInterval(usageTimer); usageTimer = null; }
   }
 }
 
@@ -1980,8 +2047,9 @@ function toast(msg, isErr) {
   setTimeout(() => el.remove(), 4000);
 }
 
-// Initial todos panel state: collapsed
-document.getElementById('todos-panel').classList.add('collapsed');
+// Prefs load + apply is called at the bottom of the file, after the
+// `let prefs = ...` declaration has run — calling it up here would hit the
+// TDZ and crash the whole script.
 
 // ── Test hooks ───────────────────────────────────────────────────────────────
 // Playwright tests need to read/write wizard state and call internal
@@ -2028,7 +2096,7 @@ window.__wizard = {
   }, true);
 
   // Wizard — step navigation + actions
-  on('btn-s1-adv-toggle',   'click', toggleS1Advanced);
+  on('btn-generate-team-token','click', doGenerateTeamToken);
   on('btn-paste-team-token','click', doPasteTeamToken);
   on('btn-step1-next',      'click', step1Next);
   on('btn-browse',          'click', doBrowse);
@@ -2101,4 +2169,318 @@ window.__wizard = {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAddTodo(); }
     });
   }
+
+  // Design refresh (2026-04-20): theme toggle, a11y panel, mic, resize,
+  // worker drill-in. Only mic + resize wire at load; a11y panel and worker
+  // glance wire inside app-panels.js when that bundle is pulled in by
+  // ensurePanels().
+  on('btn-toggle-theme', 'click', toggleTheme);
+  on('btn-toggle-a11y',  'click', toggleA11yPanel);
+  wireMic();
+  wireResize();
+
+  // Auto-theme: follow system changes if user chose 'auto'.
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+      if (prefs.theme === 'auto') applyPrefs();
+    });
+  }
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PREFERENCES (theme / font / size / density / accent / panels / motion)
+// Single versioned store in localStorage under `hmb.prefs`. Versioned so the
+// shape can evolve without wiping the user's choices — bump PREFS_VERSION
+// and add a migration branch in loadPrefs() instead of ignoring v-mismatch.
+// ═══════════════════════════════════════════════════════════════════════════
+const PREFS_KEY = 'hmb.prefs';
+const PREFS_VERSION = 1;
+const DEFAULT_PREFS = {
+  v: PREFS_VERSION,
+  theme: 'saloon',      // 'saloon' | 'daylight' | 'auto'
+  font: 'default',      // 'default' | 'readable' | 'dyslexic' | 'system'
+  size: 14,             // px, clamped 12–20
+  density: 'comfortable',
+  accent: null,         // null → theme default; else a hex like '#f0a830'
+  panels: { roster: true, todos: false, usage: false, log: false },
+  widths:  { roster: 200, todos: 280 },
+  reduceMotion: false,
+};
+let prefs = { ...DEFAULT_PREFS, panels: { ...DEFAULT_PREFS.panels }, widths: { ...DEFAULT_PREFS.widths } };
+
+const FONT_STACKS = {
+  default:  { sans: "'Manrope', ui-sans-serif, system-ui, sans-serif",
+              mono: "'JetBrains Mono', 'Fira Code', ui-monospace, monospace" },
+  readable: { sans: "'Atkinson Hyperlegible', 'Inter', ui-sans-serif, sans-serif",
+              mono: "'JetBrains Mono', ui-monospace, monospace" },
+  dyslexic: { sans: "'OpenDyslexic', 'Atkinson Hyperlegible', sans-serif",
+              mono: "'OpenDyslexicMono', 'JetBrains Mono', ui-monospace, monospace" },
+  system:   { sans: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+              mono: "ui-monospace, Menlo, Consolas, monospace" },
+};
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object' || obj.v !== PREFS_VERSION) return;
+    prefs = {
+      ...DEFAULT_PREFS,
+      ...obj,
+      panels: { ...DEFAULT_PREFS.panels, ...(obj.panels || {}) },
+      widths: { ...DEFAULT_PREFS.widths, ...(obj.widths || {}) },
+    };
+  } catch (_) { /* fall back to defaults */ }
+}
+
+function savePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (_) {}
+}
+
+function resolveTheme() {
+  if (prefs.theme === 'auto') {
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+      ? 'daylight' : 'saloon';
+  }
+  return prefs.theme === 'daylight' ? 'daylight' : 'saloon';
+}
+
+function applyPrefs() {
+  const html = document.documentElement;
+  html.setAttribute('data-theme', resolveTheme());
+  html.setAttribute('data-reduce-motion', prefs.reduceMotion ? '1' : '0');
+  html.setAttribute('data-density', prefs.density);
+
+  const stack = FONT_STACKS[prefs.font] || FONT_STACKS.default;
+  html.style.setProperty('--font-sans', stack.sans);
+  html.style.setProperty('--font-mono', stack.mono);
+  html.style.setProperty('--app-size', (prefs.size || 14) + 'px');
+
+  // Accent override. Null → remove so the theme default wins.
+  if (prefs.accent) html.style.setProperty('--accent', prefs.accent);
+  else              html.style.removeProperty('--accent');
+
+  html.style.setProperty('--roster-w', (prefs.widths.roster || 200) + 'px');
+  html.style.setProperty('--todos-w',  (prefs.widths.todos  || 280) + 'px');
+
+  // Panel visibility — keep legacy globals in sync so existing code keeps
+  // working (and don't double-fire timers for the usage panel).
+  const roster = document.getElementById('roster');
+  const rosterHandle = document.getElementById('resize-roster');
+  if (roster) roster.classList.toggle('collapsed', !prefs.panels.roster);
+  if (rosterHandle) rosterHandle.hidden = !prefs.panels.roster;
+
+  const todos = document.getElementById('todos-panel');
+  const todosHandle = document.getElementById('resize-todos');
+  if (todos) todos.classList.toggle('collapsed', !prefs.panels.todos);
+  if (todosHandle) todosHandle.hidden = !prefs.panels.todos;
+  todosVisible = !!prefs.panels.todos;
+
+  const usageEl = document.getElementById('usage-panel');
+  if (usageEl) usageEl.classList.toggle('open', !!prefs.panels.usage);
+  usageOpen = !!prefs.panels.usage;
+
+  const logEl = document.getElementById('server-log-panel');
+  if (logEl) logEl.classList.toggle('open', !!prefs.panels.log);
+  serverLogOpen = !!prefs.panels.log;
+
+  reflectPrefsIntoA11yPanel();
+}
+
+// Everything that reads/writes the a11y panel UI lives in app-panels.js and
+// is loaded on demand by ensurePanels(). These thin stubs forward to the
+// panel module once it's been hydrated; before then they're safe no-ops
+// so applyPrefs() can call reflectPrefsIntoA11yPanel() unconditionally.
+function reflectPrefsIntoA11yPanel() {
+  if (window.__panels) window.__panels.reflectPrefs();
+  // The topbar theme-button icon state is critical-path; keep it here so
+  // the active class tracks resolveTheme() even before panels are loaded.
+  const themeBtn = document.getElementById('btn-toggle-theme');
+  if (themeBtn) themeBtn.classList.toggle('active', resolveTheme() === 'daylight');
+}
+
+function toggleA11yPanel() {
+  ensurePanels().then(() => window.__panels.toggleA11y());
+}
+
+function toggleTheme() {
+  // Quick flip in the topbar. 'auto' resolves to a concrete dark/light first
+  // so the next click stays predictable. Doesn't need the a11y panel loaded.
+  const current = resolveTheme();
+  prefs.theme = current === 'daylight' ? 'saloon' : 'daylight';
+  savePrefs(); applyPrefs();
+}
+
+// ───────── Deferred panel loader ─────────
+// Inject app-panels.min.css + app-panels.min.js on first demand. Cached so
+// subsequent calls resolve immediately. Keeping both off the initial HTML
+// is what gets Lighthouse back to 100 — they're ~300 CSS + ~500 JS lines
+// that index.html would otherwise pay for at paint time.
+let __panelsPromise = null;
+function ensurePanels() {
+  if (window.__panels) return Promise.resolve();
+  if (__panelsPromise) return __panelsPromise;
+  __panelsPromise = new Promise((resolve, reject) => {
+    const link = document.createElement('link');
+    link.rel  = 'stylesheet';
+    link.href = 'app-panels.min.css';
+    document.head.appendChild(link);
+
+    const script = document.createElement('script');
+    script.src = 'app-panels.min.js';
+    script.onload  = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load app-panels.min.js'));
+    document.head.appendChild(script);
+  });
+  return __panelsPromise;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MIC — browser SpeechRecognition. Per the designer's note, when the API
+// isn't available the button stays visible but disabled with a tooltip
+// pointing at OS-native dictation so the feature doesn't silently vanish.
+// ═══════════════════════════════════════════════════════════════════════════
+function wireMic() {
+  const btn = document.getElementById('btn-mic');
+  if (!btn) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    btn.disabled = true;
+    btn.title =
+      'Voice input unavailable in this webview.\n' +
+      'Use your OS dictation: macOS Fn×2, Windows Win+H, iOS/Android keyboard mic.';
+    return;
+  }
+
+  const rec = new SR();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = navigator.language || 'en-US';
+
+  let state = 'idle';
+  let baseText = '';
+  let finalBuf = '';
+
+  function setIdle() {
+    state = 'idle';
+    btn.classList.remove('listening');
+    btn.title = 'Voice input (browser speech-to-text)';
+  }
+  function setListening() {
+    state = 'listening';
+    btn.classList.add('listening');
+    btn.title = 'Listening — click to stop';
+    const ta = document.getElementById('compose-text');
+    baseText = ta ? ta.value : '';
+    finalBuf = '';
+  }
+
+  rec.onstart  = setListening;
+  rec.onend    = setIdle;
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) finalBuf += r[0].transcript;
+      else interim += r[0].transcript;
+    }
+    const ta = document.getElementById('compose-text');
+    if (!ta) return;
+    const sep = baseText && !/\s$/.test(baseText) ? ' ' : '';
+    ta.value = baseText + sep + finalBuf + interim;
+    // Fire the input handler so slash/mention autocomplete keeps working
+    // while the user dictates.
+    ta.dispatchEvent(new Event('input'));
+  };
+  rec.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      toast('Mic permission denied — enable it in your browser settings.', true);
+    } else if (e.error === 'no-speech') {
+      // Normal timeout; don't bother the user.
+    } else {
+      toast('Mic error: ' + e.error, true);
+    }
+    setIdle();
+  };
+
+  btn.addEventListener('click', () => {
+    if (state === 'listening') { try { rec.stop(); } catch (_) {} }
+    else                       { try { rec.start(); } catch (_) {} }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESIZE HANDLES — drag between roster/feed/todos. Width persists in prefs;
+// double-click resets to the default. Collapsed state is tracked
+// independently via prefs.panels.{roster,todos}.
+// ═══════════════════════════════════════════════════════════════════════════
+function wireResize() {
+  document.querySelectorAll('.resize-handle').forEach(handle => {
+    const target = handle.dataset.target; // 'roster' | 'todos'
+    if (!target) return;
+
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const layout = document.querySelector('.layout');
+      if (!layout) return;
+      const startX = e.clientX;
+      const startW = prefs.widths[target] || (target === 'roster' ? 200 : 280);
+      // Roster is on the left (drag right → wider); todos is on the right
+      // (drag left → wider). The sign flips accordingly.
+      const sign   = target === 'roster' ? +1 : -1;
+      const minW   = target === 'roster' ? 140 : 220;
+      const maxW   = Math.max(260, Math.floor(layout.getBoundingClientRect().width - 320));
+
+      handle.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+
+      function onMove(ev) {
+        const dx = (ev.clientX - startX) * sign;
+        const w = Math.max(minW, Math.min(maxW, startW + dx));
+        prefs.widths[target] = Math.round(w);
+        document.documentElement.style.setProperty(
+          target === 'roster' ? '--roster-w' : '--todos-w',
+          prefs.widths[target] + 'px'
+        );
+      }
+      function onUp() {
+        handle.classList.remove('dragging');
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        savePrefs();
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    handle.addEventListener('dblclick', () => {
+      prefs.widths[target] = target === 'roster' ? 200 : 280;
+      savePrefs(); applyPrefs();
+    });
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKER GLANCE — "Is it working?" drill-in (deferred)
+// Full implementation (render, mock data, wiring, sparkline, git tags) lives
+// in app-panels.js. Core app only keeps these forwarding stubs so a roster
+// click can open the panel without paying for the ~500 lines of glance code
+// at initial paint. ensurePanels() injects the deferred bundle on first use.
+// ═══════════════════════════════════════════════════════════════════════════
+function openWorkerGlance(workerName, workerRole) {
+  ensurePanels().then(() => window.__panels.openGlance(workerName, workerRole));
+}
+
+function closeWorkerGlance() {
+  if (window.__panels) window.__panels.closeGlance();
+}
+
+
+// Final init: now that `prefs` + helpers are all declared, hydrate from
+// localStorage and paint the first theme/font/panel state. Runs after the
+// wireEvents IIFE above — event listeners are bound, prefs are applied.
+loadPrefs();
+applyPrefs();

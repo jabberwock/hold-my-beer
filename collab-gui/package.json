@@ -7,7 +7,8 @@
     "build": "tauri build",
     "serve": "node dev-server.js",
     "test": "playwright test",
-    "test:headed": "playwright test --headed"
+    "test:headed": "playwright test --headed",
+    "minify": "cleancss -o public/app.min.css public/app.css && cleancss -o public/app-panels.min.css public/app-panels.css && terser public/app.js -c -m --source-map -o public/app.min.js && terser public/app-panels.js -c -m --source-map -o public/app-panels.min.js && node inline-css.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
