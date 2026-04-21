@@ -92,6 +92,30 @@ pub struct WorkerState {
     pub status: Option<String>,
 }
 
+/// Merge an incoming partial state into prior on-disk state, replacing only
+/// the fields the model actually populated. Exists because `state_update`
+/// in claude's JSON has `#[serde(default)]` on every field, so a missing
+/// field (or missing state_update entirely) deserializes to None/empty-vec.
+/// A blind overwrite would then wipe memory on every turn the model omits a
+/// field — which is most turns, since the prompt describes state_update as
+/// optional. The observable symptom before this merge existed:
+/// `.worker-state.json` went all-null across sessions, so each new claude
+/// invocation had no memory of what it had just done, and workers like
+/// d4webdev fell into "no context → nothing to say → silent" loops.
+///
+/// "Populated" means `Some(_)` for Option fields and non-empty for Vec. A
+/// worker that genuinely needs to clear a field would need an explicit
+/// sentinel (e.g. empty string for status) — the prompt doesn't document
+/// one today, so merge-skip-on-empty is the safe default.
+pub(crate) fn merge_state(prior: WorkerState, incoming: &WorkerState) -> WorkerState {
+    let mut merged = prior;
+    if incoming.last_task.is_some()       { merged.last_task = incoming.last_task.clone(); }
+    if incoming.pending.is_some()         { merged.pending = incoming.pending.clone(); }
+    if incoming.status.is_some()          { merged.status = incoming.status.clone(); }
+    if !incoming.files_touched.is_empty() { merged.files_touched = incoming.files_touched.clone(); }
+    merged
+}
+
 /// Deserialize a Vec that might be null (models output null instead of [])
 fn null_as_empty_vec<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
 where
@@ -1421,7 +1445,8 @@ Act on the new messages above. Use Bash/Read/Write/Edit to do your actual work (
 
     fn save_state(&self, state: &WorkerState) {
         let path = self.workdir.join(".worker-state.json");
-        if let Ok(json) = serde_json::to_string_pretty(state) {
+        let merged = merge_state(self.load_state(), state);
+        if let Ok(json) = serde_json::to_string_pretty(&merged) {
             let _ = std::fs::write(&path, json);
         }
     }
@@ -1737,6 +1762,102 @@ mod tests {
         let input = r#"{"response": "ok", "unknown_field": 42, "another": "value", "continue": false}"#;
         let result = parse_collab_output(input).expect("should parse");
         assert_eq!(result.response.as_deref(), Some("ok"));
+    }
+
+    // ── merge_state — regression: see merge_state() doc for why this matters.
+    // Every test name below describes a shape of claude JSON we've seen in the
+    // wild that *used* to wipe prior state.
+
+    fn prior_full() -> WorkerState {
+        WorkerState {
+            last_task: Some("abc1234".to_string()),
+            pending: Some("follow-up to abc1234".to_string()),
+            files_touched: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            status: Some("working on map fix".to_string()),
+        }
+    }
+
+    #[test]
+    fn merge_state_missing_state_update_preserves_prior() {
+        // Claude returned {"response": "...", "continue": false} with no
+        // state_update. serde fills the incoming with all defaults. Prior
+        // state must survive.
+        let incoming = WorkerState::default();
+        let merged = merge_state(prior_full(), &incoming);
+        assert_eq!(merged.status.as_deref(), Some("working on map fix"));
+        assert_eq!(merged.last_task.as_deref(), Some("abc1234"));
+        assert_eq!(merged.files_touched.len(), 2);
+    }
+
+    #[test]
+    fn merge_state_empty_object_preserves_prior() {
+        // "state_update": {} — serde still fills defaults. Same outcome as
+        // missing entirely; prior state must survive.
+        let incoming: WorkerState = serde_json::from_str("{}").unwrap();
+        let merged = merge_state(prior_full(), &incoming);
+        assert_eq!(merged.status.as_deref(), Some("working on map fix"));
+        assert_eq!(merged.files_touched.len(), 2);
+    }
+
+    #[test]
+    fn merge_state_partial_update_replaces_only_provided_fields() {
+        // Claude updates status but doesn't mention files_touched. We keep
+        // the old files_touched instead of wiping it to [].
+        let incoming: WorkerState = serde_json::from_str(
+            r#"{"status": "idle — map fix landed"}"#
+        ).unwrap();
+        let merged = merge_state(prior_full(), &incoming);
+        assert_eq!(merged.status.as_deref(), Some("idle — map fix landed"));
+        // Untouched fields stay:
+        assert_eq!(merged.last_task.as_deref(), Some("abc1234"));
+        assert_eq!(merged.files_touched, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+    }
+
+    #[test]
+    fn merge_state_nonempty_files_touched_replaces() {
+        // When claude DOES provide files_touched, it replaces wholesale (not
+        // appends). That's consistent with status: the worker's latest call
+        // is the authoritative snapshot of what it touched this turn.
+        let incoming: WorkerState = serde_json::from_str(
+            r#"{"files_touched": ["src/map.css"]}"#
+        ).unwrap();
+        let merged = merge_state(prior_full(), &incoming);
+        assert_eq!(merged.files_touched, vec!["src/map.css".to_string()]);
+        // Other fields preserved:
+        assert_eq!(merged.status.as_deref(), Some("working on map fix"));
+    }
+
+    #[test]
+    fn merge_state_full_update_replaces_everything() {
+        // Sanity check: when claude populates all fields, merge behaves like
+        // the old blind-overwrite did.
+        let incoming = WorkerState {
+            last_task: Some("def5678".to_string()),
+            pending: None,
+            files_touched: vec!["src/x.rs".to_string()],
+            status: Some("done".to_string()),
+        };
+        let merged = merge_state(prior_full(), &incoming);
+        assert_eq!(merged.last_task.as_deref(), Some("def5678"));
+        // pending is None in incoming → prior is preserved. This is the
+        // designed semantic; if a worker needs to clear pending, the prompt
+        // will need a sentinel.
+        assert_eq!(merged.pending.as_deref(), Some("follow-up to abc1234"));
+        assert_eq!(merged.status.as_deref(), Some("done"));
+        assert_eq!(merged.files_touched, vec!["src/x.rs".to_string()]);
+    }
+
+    #[test]
+    fn merge_state_null_fields_preserve_prior() {
+        // Claude occasionally emits explicit nulls instead of omitting.
+        // serde deserializes both to None, so behavior is identical — prior
+        // state survives.
+        let incoming: WorkerState = serde_json::from_str(
+            r#"{"last_task": null, "pending": null, "status": null, "files_touched": null}"#
+        ).unwrap_or_default();
+        let merged = merge_state(prior_full(), &incoming);
+        assert_eq!(merged.status.as_deref(), Some("working on map fix"));
+        assert_eq!(merged.files_touched.len(), 2);
     }
 
     #[test]
