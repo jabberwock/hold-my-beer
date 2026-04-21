@@ -157,19 +157,16 @@ fn render_agent_md(cfg: &TeamConfig, worker: &TeamWorker, source: &Path) -> Stri
             .join(", ")
     };
 
-    let hands_off_hint = if worker.hands_off_to.is_empty() {
-        String::new()
-    } else {
-        let list = worker
-            .hands_off_to
-            .iter()
-            .map(|n| format!("`@{}`", n))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "\n## Auto-Handoff\n\nWhen you finish a task, the harness will automatically dispatch downstream to: {}\n",
-            list
-        )
+    // AGENT.md auto-handoff hint is driven by reports_to (the post-migration
+    // singular field). Legacy hands_off_to gets flattened into reports_to by
+    // TeamConfig::from_yaml, so by the time we get here it's already the
+    // source of truth. No dupe-message surprises for the reader.
+    let hands_off_hint = match &worker.reports_to {
+        Some(target) => format!(
+            "\n## Auto-Handoff\n\nWhen you finish a task, the harness will automatically dispatch downstream to: `@{}`\n",
+            target
+        ),
+        None => String::new(),
     };
 
     let tasks_section = match &worker.tasks {

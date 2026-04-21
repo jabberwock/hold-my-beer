@@ -164,9 +164,18 @@ pub struct WorkerHarness {
     batch_wait_ms: u64,
     message_queue: Arc<Mutex<Vec<Message>>>,
     first_message_time: Arc<Mutex<Option<Instant>>>,
-    /// Pipeline: auto-dispatch to these workers on task completion
-    hands_off_to: Vec<String>,
-    /// All teammates (name + role) for prompt injection
+    /// Pipeline completion target. When a task is marked done, a
+    /// "Completed work from @me: …" message fires to this teammate.
+    /// `None` = no auto-handoff.
+    reports_to: Option<String>,
+    /// Peers this worker actively coordinates with. Narrows the prompt's
+    /// "Your team:" section. When neither this nor `reports_to` is set,
+    /// the full `teammates` list is shown instead (solo/unconfigured
+    /// fallback).
+    works_with: Vec<String>,
+    /// All teammates (name + role) for prompt injection. Full team
+    /// roster; the prompt filters it through `reports_to`/`works_with`
+    /// when those are populated.
     teammates: Vec<(String, String)>,
     /// Per-call CLI timeout. Constructor-defaulted to env COLLAB_CLI_TIMEOUT_SECS or 300s,
     /// but exposed as a field so tests can inject short values without touching global env.
@@ -182,7 +191,8 @@ impl WorkerHarness {
         cli_template: Option<String>,
         auto_reply: bool,
         batch_wait_ms: u64,
-        hands_off_to: Vec<String>,
+        reports_to: Option<String>,
+        works_with: Vec<String>,
         teammates: Vec<(String, String)>,
     ) -> Self {
         Self::new_with_api(
@@ -193,7 +203,8 @@ impl WorkerHarness {
             cli_template,
             auto_reply,
             batch_wait_ms,
-            hands_off_to,
+            reports_to,
+            works_with,
             teammates,
         )
     }
@@ -207,7 +218,8 @@ impl WorkerHarness {
         cli_template: Option<String>,
         auto_reply: bool,
         batch_wait_ms: u64,
-        hands_off_to: Vec<String>,
+        reports_to: Option<String>,
+        works_with: Vec<String>,
         teammates: Vec<(String, String)>,
     ) -> Self {
         Self {
@@ -220,7 +232,8 @@ impl WorkerHarness {
             batch_wait_ms,
             message_queue: Arc::new(Mutex::new(Vec::new())),
             first_message_time: Arc::new(Mutex::new(None)),
-            hands_off_to,
+            reports_to,
+            works_with,
             teammates,
             // 900s (15 min) per call. Earlier default was 300s but that
             // killed sonnet workers mid-task on real work: with ~50KB of
@@ -326,7 +339,8 @@ impl WorkerHarness {
         let model = self.model.clone();
         let cli_template = self.cli_template.clone();
         let auto_reply = self.auto_reply;
-        let hands_off_to = self.hands_off_to.clone();
+        let reports_to = self.reports_to.clone();
+        let works_with = self.works_with.clone();
         let teammates = self.teammates.clone();
         let batch_status = current_status.clone();
         let cli_timeout_secs = self.cli_timeout_secs;
@@ -353,7 +367,8 @@ impl WorkerHarness {
         let watchdog_workdir = workdir.clone();
         let watchdog_model = model.clone();
         let watchdog_cli_template = cli_template.clone();
-        let watchdog_hands_off_to = hands_off_to.clone();
+        let watchdog_reports_to = reports_to.clone();
+        let watchdog_works_with = works_with.clone();
         let watchdog_teammates = teammates.clone();
         let watchdog_batch_status = current_status.clone();
         let watchdog_cli_lock = cli_lock.clone();
@@ -368,7 +383,8 @@ impl WorkerHarness {
                     let workdir = watchdog_workdir.clone();
                     let model = watchdog_model.clone();
                     let cli_template = watchdog_cli_template.clone();
-                    let hands_off_to = watchdog_hands_off_to.clone();
+                    let reports_to = watchdog_reports_to.clone();
+                    let works_with = watchdog_works_with.clone();
                     let teammates = watchdog_teammates.clone();
                     let batch_status = watchdog_batch_status.clone();
                     let cli_lock = watchdog_cli_lock.clone();
@@ -448,7 +464,8 @@ impl WorkerHarness {
                     batch_wait_ms,
                     message_queue: Arc::new(Mutex::new(Vec::new())),
                     first_message_time: Arc::new(Mutex::new(None)),
-                    hands_off_to: hands_off_to.clone(),
+                    reports_to: reports_to.clone(),
+                    works_with: works_with.clone(),
                     teammates: teammates.clone(),
                     cli_timeout_secs,
                 };
@@ -867,18 +884,52 @@ impl WorkerHarness {
             _ => "No pending tasks.".to_string(),
         };
 
-        let teammates_str = if self.teammates.is_empty() {
+        // Narrow the visible teammate list when the worker has an explicit
+        // relationship graph (reports_to / works_with). Model sees fewer
+        // names, so it's less tempted to fan-message the whole team when
+        // only a couple of people are relevant. When *neither* relationship
+        // field is set (solo worker, or config predating the schema
+        // split), fall back to the full roster so the model still knows
+        // who's around.
+        let has_explicit_relations =
+            self.reports_to.is_some() || !self.works_with.is_empty();
+        let visible: Vec<(&String, &String, Option<&'static str>)> = if has_explicit_relations {
+            let mut v: Vec<(&String, &String, Option<&'static str>)> = Vec::new();
+            for (name, role) in &self.teammates {
+                if name == &self.instance_id {
+                    continue;
+                }
+                if self.reports_to.as_deref() == Some(name.as_str()) {
+                    v.push((name, role, Some("reports-to")));
+                } else if self.works_with.iter().any(|w| w == name) {
+                    v.push((name, role, None));
+                }
+            }
+            v
+        } else {
+            self.teammates
+                .iter()
+                .filter(|(name, _)| name != &self.instance_id)
+                .map(|(n, r)| (n, r, None))
+                .collect()
+        };
+
+        let teammates_str = if visible.is_empty() {
             "No teammates configured.".to_string()
         } else {
             let mut lines = String::from("Your team:\n");
-            for (name, role) in &self.teammates {
-                if name != &self.instance_id {
+            for (name, role, tag) in &visible {
+                if let Some(t) = tag {
+                    lines.push_str(&format!("  @{} — {} [{}]\n", name, role, t));
+                } else {
                     lines.push_str(&format!("  @{} — {}\n", name, role));
                 }
             }
-            if !self.hands_off_to.is_empty() {
-                lines.push_str(&format!("\nWhen you complete a task, your work auto-routes to: {}\n",
-                    self.hands_off_to.iter().map(|w| format!("@{}", w)).collect::<Vec<_>>().join(", ")));
+            if let Some(rt) = &self.reports_to {
+                lines.push_str(&format!(
+                    "\nWhen you complete a task, your work auto-routes to: @{}\n",
+                    rt
+                ));
             }
             lines
         };
@@ -1316,25 +1367,30 @@ Act on the new messages above. Use Bash/Read/Write/Edit to do your actual work (
                 }
             }
 
-            // Pipeline: auto-dispatch to downstream workers. Skip any that
+            // Pipeline: auto-dispatch to the reports_to target. Skip if it
             // already received a message this turn via response/delegate/messages.
             // Guard: only route if at least one task was *actually* confirmed done.
-            if actually_completed > 0 && !self.hands_off_to.is_empty() {
-                let summary = collab_output.response.as_deref().unwrap_or("Task completed.");
-                let handoff_msg = format!("Completed work from @{}: {}", self.instance_id, summary);
-                for downstream in &self.hands_off_to {
-                    let to = downstream.trim_start_matches('@').to_string();
+            //
+            // Deliberately singular (vs. the old Vec<String> hands_off_to which
+            // fanned identical completion messages out to every listed teammate
+            // and caused noisy dupes). Workers that legitimately need to notify
+            // multiple teammates can populate messages[] / delegate[] explicitly.
+            if actually_completed > 0 {
+                if let Some(target) = self.reports_to.as_ref() {
+                    let to = target.trim_start_matches('@').to_string();
                     if replied.contains(&to)
                         || delegated_to.contains(&to)
                         || messaged.contains(&to)
                     {
                         self.log(&format!("skipped pipeline → @{} (already contacted this turn)", to));
-                        continue;
-                    }
-                    if let Err(e) = self.client.add_message(&to, &handoff_msg, None).await {
-                        self.log_error(&format!("Failed to route to @{}: {}", to, e));
                     } else {
-                        self.log(&format!("pipeline → @{}", to));
+                        let summary = collab_output.response.as_deref().unwrap_or("Task completed.");
+                        let handoff_msg = format!("Completed work from @{}: {}", self.instance_id, summary);
+                        if let Err(e) = self.client.add_message(&to, &handoff_msg, None).await {
+                            self.log_error(&format!("Failed to route to @{}: {}", to, e));
+                        } else {
+                            self.log(&format!("pipeline → @{}", to));
+                        }
                     }
                 }
             }
@@ -2114,6 +2170,17 @@ mod integration {
         fake: Arc<dyn CollabApi>,
         instance_id: &str,
     ) -> WorkerHarness {
+        make_harness_with_relations(cli_template, workdir, fake, instance_id, None, vec![])
+    }
+
+    fn make_harness_with_relations(
+        cli_template: &str,
+        workdir: &Path,
+        fake: Arc<dyn CollabApi>,
+        instance_id: &str,
+        reports_to: Option<String>,
+        works_with: Vec<String>,
+    ) -> WorkerHarness {
         WorkerHarness::new_with_api(
             fake,
             instance_id.into(),
@@ -2122,8 +2189,9 @@ mod integration {
             Some(cli_template.into()),
             true,
             10,
-            vec![],
-            vec![],
+            reports_to,
+            works_with,
+            vec![],   // teammates
         )
     }
 
@@ -2318,5 +2386,98 @@ mod integration {
             "response field must not be sent as a separate message to a delegate target");
         // The todo itself must still be created
         assert_eq!(fake.added_todos(), vec![("human".into(), "do the thing".into())]);
+    }
+
+    // ── reports_to / works_with (team relationship schema) ────────────
+    // Regression: the old Vec<String> `hands_off_to` fanned identical
+    // "Completed work from @me" messages out to every listed teammate.
+    // The new schema routes completion to exactly one recipient.
+
+    #[tokio::test]
+    async fn handoff_fires_single_completion_to_reports_to() {
+        let id = unique_id("handoff");
+        let dir = TempDir::new().unwrap();
+        // Worker returns a completed hash; harness should then forward to
+        // the reports_to target.
+        let json = r#"{"response":"done fixing the map","completed_tasks":["abc123"],"continue":false}"#;
+        let script = write_script(&dir, "done.sh", &format!("printf '%s' '{}'", json));
+        let fake = FakeApi::new();
+        let harness = make_harness_with_relations(
+            &script, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id,
+            Some("reviewer".into()), vec![],
+        );
+
+        harness.spawn_cli(&[user_msg("please fix it")]).await.unwrap();
+
+        // Exactly one message to @reviewer with the handoff format — not
+        // one per works_with / teammates entry.
+        let to_reviewer: Vec<String> = fake.added_messages()
+            .into_iter()
+            .filter_map(|(r, c)| if r == "reviewer" { Some(c) } else { None })
+            .collect();
+        assert_eq!(to_reviewer.len(), 1, "expected one handoff message, got: {:?}", to_reviewer);
+        assert!(
+            to_reviewer[0].contains("Completed work from @") && to_reviewer[0].contains("done fixing the map"),
+            "handoff text wrong: {}", to_reviewer[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_suppressed_when_no_reports_to() {
+        // A worker with no reports_to must not emit any handoff message
+        // even if it completed tasks. (The old design would emit to every
+        // hands_off_to entry; empty vec meant silent, which was the only
+        // safe way to stop fan-out.)
+        let id = unique_id("no-handoff");
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"response":"done","completed_tasks":["abc123"],"continue":false}"#;
+        let script = write_script(&dir, "done.sh", &format!("printf '%s' '{}'", json));
+        let fake = FakeApi::new();
+        let harness = make_harness_with_relations(
+            &script, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id,
+            None, vec![],
+        );
+
+        harness.spawn_cli(&[user_msg("please")]).await.unwrap();
+
+        let handoffs: Vec<_> = fake.added_messages()
+            .into_iter()
+            .filter(|(_, c)| c.contains("Completed work from @"))
+            .collect();
+        assert!(handoffs.is_empty(), "expected no handoff, got: {:?}", handoffs);
+    }
+
+    #[tokio::test]
+    async fn handoff_skipped_when_reports_to_already_replied() {
+        // If the worker's `response` already went to @reviewer (because
+        // @reviewer was the sender), the handoff should NOT fire a second
+        // identical-looking message. Dedup logic lives in the harness.
+        let id = unique_id("handoff-dedupe");
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"response":"all good","completed_tasks":["abc123"],"continue":false}"#;
+        let script = write_script(&dir, "done.sh", &format!("printf '%s' '{}'", json));
+        let fake = FakeApi::new();
+        let harness = make_harness_with_relations(
+            &script, dir.path(), fake.clone() as Arc<dyn CollabApi>, &id,
+            Some("reviewer".into()), vec![],
+        );
+
+        // Message comes from @reviewer, so the response goes back to them.
+        let incoming = Message {
+            sender: "reviewer".into(),
+            recipient: id.clone(),
+            content: "status?".into(),
+            ..user_msg("status?")
+        };
+        harness.spawn_cli(&[incoming]).await.unwrap();
+
+        let to_reviewer: Vec<String> = fake.added_messages()
+            .into_iter()
+            .filter_map(|(r, c)| if r == "reviewer" { Some(c) } else { None })
+            .collect();
+        // One message total (the response) — no handoff dup.
+        assert_eq!(to_reviewer.len(), 1, "expected exactly one, got: {:?}", to_reviewer);
+        assert!(to_reviewer[0].contains("all good"));
+        assert!(!to_reviewer[0].contains("Completed work from @"));
     }
 }

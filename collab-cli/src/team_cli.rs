@@ -293,6 +293,11 @@ pub fn adopt(workers_yml: &Path, team_yml_path: &Path) -> Result<()> {
             color: lw.color,
             model: lw.model.clone(),
             cli_template: lw.cli_template.clone(),
+            // Legacy workers.yml never exposed reports_to / works_with;
+            // leave them unset here and let TeamConfig::from_yaml's
+            // migration split hands_off_to into them on the next load.
+            reports_to: None,
+            works_with: Vec::new(),
             hands_off_to: lw.hands_off_to.clone(),
         });
     }

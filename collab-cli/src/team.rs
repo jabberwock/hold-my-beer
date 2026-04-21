@@ -66,7 +66,24 @@ pub struct TeamWorker {
     pub model: Option<String>,
     pub cli_template: Option<String>,
 
-    /// Names of other workers in the same team to auto-handoff to.
+    /// Who this worker reports completed work to. When a task is marked
+    /// complete, the harness forwards a "Completed work from @me: …"
+    /// message to exactly this teammate (or no one if unset). Singular on
+    /// purpose — a previous design used `hands_off_to: [...]` which fanned
+    /// identical completion messages out to every listed teammate.
+    #[serde(default)]
+    pub reports_to: Option<String>,
+
+    /// Peers this worker actively coordinates with. Listed in the prompt's
+    /// "Your team:" section so the model knows who it can @-mention,
+    /// delegate to, and expect messages from. No auto-routing attached —
+    /// messaging decisions are still the worker's.
+    #[serde(default)]
+    pub works_with: Vec<String>,
+
+    /// Deprecated alias. Migrated at load time: first entry becomes
+    /// `reports_to`; any remaining entries become `works_with`. Kept for
+    /// back-compat with team.yml files written by older GUIs / CLIs.
     #[serde(default)]
     pub hands_off_to: Vec<String>,
 }
@@ -129,7 +146,7 @@ impl TeamConfig {
     /// pointing at the same repo is a guaranteed double-spawn), bogus team
     /// name characters.
     pub fn from_yaml(contents: &str) -> Result<Self> {
-        let cfg: TeamConfig = serde_yaml::from_str(contents)
+        let mut cfg: TeamConfig = serde_yaml::from_str(contents)
             .map_err(|e| anyhow!("Invalid team.yml: {}", e))?;
 
         if !is_valid_team_name(&cfg.team) {
@@ -166,35 +183,85 @@ impl TeamConfig {
                 anyhow::bail!("worker '{}' has empty codebase_path", w.name);
             }
 
+            // Shape-check both legacy and new relationship fields. Reference
+            // validation happens in a second pass below (needs all names).
+            let name_pattern_ok = |s: &str| {
+                !s.is_empty()
+                    && s.len() <= 64
+                    && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            };
             for ho in &w.hands_off_to {
-                // hands_off_to is resolved later (can reference any teammate);
-                // we only validate shape here.
-                if ho.is_empty() || ho.len() > 64
-                    || !ho.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
-                    anyhow::bail!(
-                        "worker '{}' has invalid hands_off_to target '{}'",
-                        w.name, ho
-                    );
+                if !name_pattern_ok(ho) {
+                    anyhow::bail!("worker '{}' has invalid hands_off_to target '{}'", w.name, ho);
+                }
+            }
+            if let Some(rt) = &w.reports_to {
+                if !name_pattern_ok(rt) {
+                    anyhow::bail!("worker '{}' has invalid reports_to target '{}'", w.name, rt);
+                }
+            }
+            for ww in &w.works_with {
+                if !name_pattern_ok(ww) {
+                    anyhow::bail!("worker '{}' has invalid works_with entry '{}'", w.name, ww);
                 }
             }
         }
 
-        // Validate hands_off_to references actually exist in the team.
+        // Migrate `hands_off_to` → `reports_to` + `works_with` when the new
+        // fields aren't already set. Back-compat for team.yml files written
+        // before the schema split.
+        //
+        // Rule: first hands_off_to entry → reports_to (pipeline singular).
+        //       any remaining entries → works_with (peer visibility).
+        // The original hands_off_to vector is kept as-is so downstream code
+        // that still reads it gets the same behavior until it's ported.
+        for w in &mut cfg.workers {
+            let already_has_new_fields = w.reports_to.is_some() || !w.works_with.is_empty();
+            if already_has_new_fields || w.hands_off_to.is_empty() {
+                continue;
+            }
+            let mut iter = w.hands_off_to.iter().cloned();
+            w.reports_to = iter.next();
+            w.works_with = iter.collect();
+            if w.hands_off_to.len() > 1 {
+                eprintln!(
+                    "warning: worker '{}' uses deprecated `hands_off_to: [{}]` — \
+                     migrated first entry '{}' to `reports_to` and the rest to `works_with`. \
+                     Update team.yml to use the new fields directly.",
+                    w.name,
+                    w.hands_off_to.join(", "),
+                    w.reports_to.as_deref().unwrap_or("")
+                );
+            }
+        }
+
+        // Validate relationship targets actually exist in the team + aren't
+        // self-references. Applies to legacy `hands_off_to` too so an
+        // already-migrated config still catches bad legacy values.
         for w in &cfg.workers {
+            let check = |field: &str, target: &str| -> Result<()> {
+                if target == w.name {
+                    anyhow::bail!(
+                        "worker '{}' {} itself — a worker can't hand off to itself",
+                        w.name, field
+                    );
+                }
+                if !seen_names.contains(target) {
+                    anyhow::bail!(
+                        "worker '{}' {} unknown teammate '{}' (not in team.yml)",
+                        w.name, field, target
+                    );
+                }
+                Ok(())
+            };
+            if let Some(rt) = &w.reports_to {
+                check("reports_to", rt)?;
+            }
+            for ww in &w.works_with {
+                check("works_with", ww)?;
+            }
             for ho in &w.hands_off_to {
-                if ho == &w.name {
-                    anyhow::bail!(
-                        "worker '{}' hands_off_to itself — pipelines can't self-loop",
-                        w.name
-                    );
-                }
-                if !seen_names.contains(ho) {
-                    anyhow::bail!(
-                        "worker '{}' hands_off_to unknown teammate '{}' (not in team.yml)",
-                        w.name, ho
-                    );
-                }
+                check("hands_off_to", ho)?;
             }
         }
 
@@ -350,8 +417,16 @@ workers:
     codebase_path: /a
     hands_off_to: [a]
 "#;
+        // After the relationship-schema split, `hands_off_to: [a]` migrates
+        // into `reports_to: a`, so the self-reference is caught by the
+        // reports_to validator instead of a hands_off-specific message.
+        // Loosened the assertion to match either wording.
         let err = TeamConfig::from_yaml(yaml).unwrap_err().to_string();
-        assert!(err.contains("self-loop"), "got: {}", err);
+        assert!(
+            err.contains("itself") || err.contains("self-loop"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -375,6 +450,152 @@ workers: []
 "#;
         let err = TeamConfig::from_yaml(yaml).unwrap_err().to_string();
         assert!(err.contains("no workers"), "got: {}", err);
+    }
+
+    // ── Relationship-schema (reports_to / works_with) ───────────────────
+
+    #[test]
+    fn parses_reports_to_and_works_with() {
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    reports_to: b
+    works_with: [c]
+  - name: b
+    role: r
+    codebase_path: /b
+  - name: c
+    role: r
+    codebase_path: /c
+"#;
+        let cfg = TeamConfig::from_yaml(yaml).expect("parse");
+        let a = cfg.workers.iter().find(|w| w.name == "a").unwrap();
+        assert_eq!(a.reports_to.as_deref(), Some("b"));
+        assert_eq!(a.works_with, vec!["c".to_string()]);
+        // No legacy hands_off_to set → empty.
+        assert!(a.hands_off_to.is_empty());
+    }
+
+    #[test]
+    fn migrates_hands_off_to_singleton_to_reports_to() {
+        // Regression: pre-schema-split team.yml files have only hands_off_to.
+        // A single entry must migrate to reports_to (the pipeline target).
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    hands_off_to: [b]
+  - name: b
+    role: r
+    codebase_path: /b
+"#;
+        let cfg = TeamConfig::from_yaml(yaml).expect("parse");
+        let a = cfg.workers.iter().find(|w| w.name == "a").unwrap();
+        assert_eq!(a.reports_to.as_deref(), Some("b"));
+        assert!(a.works_with.is_empty());
+    }
+
+    #[test]
+    fn migrates_hands_off_to_multiple_splits_across_fields() {
+        // Multiple legacy entries: first becomes reports_to (to preserve
+        // auto-handoff), remainder become works_with (peer visibility
+        // without auto-routing).
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    hands_off_to: [b, c, d]
+  - name: b
+    role: r
+    codebase_path: /b
+  - name: c
+    role: r
+    codebase_path: /c
+  - name: d
+    role: r
+    codebase_path: /d
+"#;
+        let cfg = TeamConfig::from_yaml(yaml).expect("parse");
+        let a = cfg.workers.iter().find(|w| w.name == "a").unwrap();
+        assert_eq!(a.reports_to.as_deref(), Some("b"));
+        assert_eq!(a.works_with, vec!["c".to_string(), "d".to_string()]);
+    }
+
+    #[test]
+    fn explicit_new_fields_skip_legacy_migration() {
+        // If reports_to or works_with is already set, hands_off_to must not
+        // overwrite them. The new fields are the source of truth.
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    reports_to: b
+    hands_off_to: [c]
+  - name: b
+    role: r
+    codebase_path: /b
+  - name: c
+    role: r
+    codebase_path: /c
+"#;
+        let cfg = TeamConfig::from_yaml(yaml).expect("parse");
+        let a = cfg.workers.iter().find(|w| w.name == "a").unwrap();
+        assert_eq!(a.reports_to.as_deref(), Some("b"));
+        assert!(a.works_with.is_empty());
+        // Legacy hands_off_to is preserved verbatim for any still-legacy reader,
+        // but reports_to wins for routing.
+        assert_eq!(a.hands_off_to, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn rejects_reports_to_self_reference() {
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    reports_to: a
+"#;
+        let err = TeamConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("itself"), "got: {}", err);
+    }
+
+    #[test]
+    fn rejects_works_with_unknown_teammate() {
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    works_with: [ghost]
+"#;
+        let err = TeamConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("unknown teammate") && err.contains("ghost"), "got: {}", err);
+    }
+
+    #[test]
+    fn rejects_reports_to_unknown_teammate() {
+        let yaml = r#"
+team: t
+workers:
+  - name: a
+    role: r
+    codebase_path: /a
+    reports_to: ghost
+"#;
+        let err = TeamConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("unknown teammate") && err.contains("ghost"), "got: {}", err);
     }
 
     #[test]

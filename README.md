@@ -336,30 +336,41 @@ If JSON parsing fails, the entire output is sent as a raw text response (fallbac
 
 ### Pipeline routing
 
-Define `hands_off_to` in `workers.yaml` to create automatic handoff chains:
+Define `reports_to` (and optionally `works_with`) in `workers.yaml` / `team.yml` to describe the team graph:
 
 ```yaml
 cli_template: "agent -p {prompt} --model {model} --allowedTools Bash,Read,Write,Edit"
 workers:
   - name: researcher
     role: "Data researcher"
-    hands_off_to: [project-manager]
+    reports_to: project-manager          # who gets "Completed work from @me"
+    works_with: [validator]              # peers — appear in prompt's "Your team:"
 
   - name: validator
     role: "Data accuracy auditor"
-    hands_off_to: [project-manager]
+    reports_to: project-manager
 
   - name: builder
     role: "Frontend developer"
-    hands_off_to: [project-manager]
+    reports_to: project-manager
+    works_with: [researcher]
     cli_template: "codex -p {prompt} --model {model}"  # per-worker override
 
   - name: project-manager
     role: "Coordinate the team, handle exceptions"
-    # no hands_off_to — dispatches via delegate
+    works_with: [researcher, validator, builder]
+    # no reports_to — dispatches via delegate
 ```
 
-When a worker marks a task complete (`completed_tasks`), the harness automatically sends the worker's response to all downstream workers in `hands_off_to`. Workers that already received the response as a direct reply are skipped (no duplicates).
+**`reports_to`** (singular): when a worker marks a task complete (`completed_tasks`), the harness sends a single `"Completed work from @me: …"` message to this teammate. Nothing fires if unset. The recipient is skipped if they already received the response as a direct reply this turn (no duplicates).
+
+**`works_with`** (list): peers the worker actively coordinates with. Shown in the prompt's `Your team:` section alongside `reports_to` so the model knows who it can @-mention, delegate to, or expect messages from. Purely informational — no auto-routing.
+
+When *neither* field is set (solo worker, or a config predating the schema split), the prompt falls back to listing every other worker in the team. Safe default for simple setups.
+
+#### Legacy `hands_off_to`
+
+Older configs used `hands_off_to: [a, b, c]` — a list that auto-routed completion messages to *every* listed teammate. That fanned identical status dupes across the team, so the schema was split into `reports_to` + `works_with`. The parser still accepts `hands_off_to` and migrates it at load time: the first entry becomes `reports_to`, the rest become `works_with`. Multi-entry `hands_off_to` values log a deprecation notice — update your `team.yml` when you next touch it.
 
 Delegate notifications send one short ping per worker ("check your todo list"), not the full task text — the details live in the todo queue.
 

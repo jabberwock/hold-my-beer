@@ -601,7 +601,7 @@ async fn main() -> Result<()> {
         let probe_dir = workdir
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let (hands_off_to, teammates, manifest_cli_template,
+        let (reports_to, works_with, teammates, manifest_cli_template,
              manifest_codebase, manifest_model) =
             resolve_worker_manifest(&probe_dir, &instance_id);
 
@@ -720,7 +720,8 @@ async fn main() -> Result<()> {
             resolved_cli_template,
             auto_reply,
             batch_wait,
-            hands_off_to,
+            reports_to,
+            works_with,
             teammates,
         );
         harness.run().await?;
@@ -1467,10 +1468,13 @@ fn dispatch_role(action: RoleAction, instance: Option<&str>) -> Result<()> {
                     if let Some(t) = cfg.resolved_cli_template(me) {
                         println!("  cli_template:    {}", t);
                     }
-                    if !me.hands_off_to.is_empty() {
+                    if let Some(rt) = &me.reports_to {
+                        println!("  reports_to:      @{}", rt);
+                    }
+                    if !me.works_with.is_empty() {
                         println!(
-                            "  hands_off_to:    {}",
-                            me.hands_off_to.iter().map(|n| format!("@{}", n)).collect::<Vec<_>>().join(", ")
+                            "  works_with:      {}",
+                            me.works_with.iter().map(|n| format!("@{}", n)).collect::<Vec<_>>().join(", ")
                         );
                     }
                     if let Some(tasks) = &me.tasks {
@@ -1594,7 +1598,8 @@ fn hostname_best_effort() -> String {
 /// are only populated when a manifest is present and has an entry matching
 /// `instance_id` — the caller applies the flag-or-manifest fallback.
 struct WorkerManifestLookup {
-    hands_off_to: Vec<String>,
+    reports_to: Option<String>,
+    works_with: Vec<String>,
     teammates: Vec<(String, String)>,
     cli_template: Option<String>,
     codebase_path: Option<String>,
@@ -1609,11 +1614,12 @@ struct WorkerManifestLookup {
 fn resolve_worker_manifest(
     workdir: &std::path::Path,
     instance_id: &str,
-) -> (Vec<String>, Vec<(String, String)>, Option<String>,
+) -> (Option<String>, Vec<String>, Vec<(String, String)>, Option<String>,
       Option<String>, Option<String>) {
     let lookup = resolve_worker_manifest_inner(workdir, instance_id);
     (
-        lookup.hands_off_to,
+        lookup.reports_to,
+        lookup.works_with,
         lookup.teammates,
         lookup.cli_template,
         lookup.codebase_path,
@@ -1631,7 +1637,8 @@ fn resolve_worker_manifest_inner(
         match team::TeamConfig::from_yaml_file(&yaml_path) {
             Ok(cfg) => {
                 let me = cfg.workers.iter().find(|w| w.name == instance_id);
-                let hands_off = me.map(|w| w.hands_off_to.clone()).unwrap_or_default();
+                let reports_to = me.and_then(|w| w.reports_to.clone());
+                let works_with = me.map(|w| w.works_with.clone()).unwrap_or_default();
                 let tmpl = me.and_then(|w| cfg.resolved_cli_template(w));
                 let codebase = me.map(|w| w.codebase_path.clone());
                 let model = me.and_then(|w| cfg.resolved_model(w));
@@ -1641,7 +1648,8 @@ fn resolve_worker_manifest_inner(
                     .map(|w| (w.name.clone(), w.role.clone()))
                     .collect();
                 return WorkerManifestLookup {
-                    hands_off_to: hands_off,
+                    reports_to,
+                    works_with,
                     teammates,
                     cli_template: tmpl,
                     codebase_path: codebase,
@@ -1658,9 +1666,13 @@ fn resolve_worker_manifest_inner(
         }
     }
 
-    // Second choice: legacy workers.json.
+    // Second choice: legacy workers.json. It never carried reports_to /
+    // works_with, so we synthesize them from `hands_off_to` with the same
+    // migration rule TeamConfig::from_yaml uses: first entry → reports_to,
+    // rest → works_with.
     let empty = WorkerManifestLookup {
-        hands_off_to: vec![],
+        reports_to: None,
+        works_with: vec![],
         teammates: vec![],
         cli_template: None,
         codebase_path: None,
@@ -1671,6 +1683,9 @@ fn resolve_worker_manifest_inner(
             Ok(manifest) => {
                 let entry = manifest.iter().find(|w| w.name == instance_id);
                 let hands_off = entry.map(|w| w.hands_off_to.clone()).unwrap_or_default();
+                let mut iter = hands_off.iter().cloned();
+                let reports_to = iter.next();
+                let works_with: Vec<String> = iter.collect();
                 let tmpl = entry.and_then(|w| w.cli_template.clone());
                 let codebase = entry.map(|w| w.codebase_path.clone());
                 let model = entry.map(|w| w.model.clone()).filter(|s| !s.is_empty());
@@ -1679,7 +1694,8 @@ fn resolve_worker_manifest_inner(
                     .map(|w| (w.name.clone(), w.role.clone()))
                     .collect();
                 WorkerManifestLookup {
-                    hands_off_to: hands_off,
+                    reports_to,
+                    works_with,
                     teammates: team,
                     cli_template: tmpl,
                     codebase_path: codebase,
