@@ -422,6 +422,7 @@ async fn list_messages(
             WHERE (recipient = ? OR recipient = 'all')
               AND COALESCE(team_id, '') = COALESCE(?, '')
               AND timestamp >= ?
+              AND read_at IS NULL
             ORDER BY timestamp DESC
             "#,
         )
@@ -436,21 +437,25 @@ async fn list_messages(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // In audit mode stamp read_at on messages being seen for the first time.
-    if state.audit {
-        let now = Utc::now().to_rfc3339();
-        let _ = sqlx::query(
-            r#"UPDATE messages SET read_at = ?
-               WHERE (recipient = ? OR recipient = 'all')
-                 AND COALESCE(team_id, '') = COALESCE(?, '')
-                 AND read_at IS NULL"#,
-        )
-        .bind(&now)
-        .bind(&instance_id)
-        .bind(auth.team_id.as_deref())
-        .execute(&state.db)
-        .await;
-    }
+    // Stamp read_at so the worker doesn't re-receive these messages on its
+    // next fetch (restart, reconnect, etc). Before this, every restart
+    // replayed the last 8h of messages — each 📋-marked replay triggered a
+    // fresh claude invocation, burning tokens on work the worker had
+    // already done.
+    //
+    // Audit mode keeps the same stamping for historical consistency.
+    let now = Utc::now().to_rfc3339();
+    let _ = sqlx::query(
+        r#"UPDATE messages SET read_at = ?
+           WHERE (recipient = ? OR recipient = 'all')
+             AND COALESCE(team_id, '') = COALESCE(?, '')
+             AND read_at IS NULL"#,
+    )
+    .bind(&now)
+    .bind(&instance_id)
+    .bind(auth.team_id.as_deref())
+    .execute(&state.db)
+    .await;
 
     let messages = parse_message_rows(rows);
     Ok(Json(messages))
@@ -2302,6 +2307,34 @@ mod lease_tests {
         let msgs_b: Vec<Message> = serde_json::from_slice(&body_bytes(list_b).await).unwrap();
         assert_eq!(msgs_b.len(), 1);
         assert_eq!(msgs_b[0].content, "team-b hello");
+    }
+
+    /// Regression: before this fix, GET /messages/:instance_id returned the
+    /// last 8h of messages on every call regardless of read state. A worker
+    /// restart (./start.sh, crash, reconnect) would replay every 📋-marked
+    /// task assignment, triggering redundant claude invocations — pure token
+    /// burn. Now each message is served exactly once per recipient.
+    #[tokio::test]
+    async fn list_messages_does_not_replay_across_fetches() {
+        let (app, tok_a, _tok_b) = app_with_two_teams().await;
+
+        let _ = app.clone().oneshot(msg_req(Some(&tok_a), "pm", "webdev", "task 1")).await.unwrap();
+        let _ = app.clone().oneshot(msg_req(Some(&tok_a), "pm", "webdev", "task 2")).await.unwrap();
+
+        let list1 = app.clone().oneshot(list_req(Some(&tok_a), "webdev")).await.unwrap();
+        let msgs1: Vec<Message> = serde_json::from_slice(&body_bytes(list1).await).unwrap();
+        assert_eq!(msgs1.len(), 2, "first fetch should return both unread messages");
+
+        let list2 = app.clone().oneshot(list_req(Some(&tok_a), "webdev")).await.unwrap();
+        let msgs2: Vec<Message> = serde_json::from_slice(&body_bytes(list2).await).unwrap();
+        assert_eq!(msgs2.len(), 0, "second fetch must be empty — read_at is stamped");
+
+        // New message after the replay window still gets through.
+        let _ = app.clone().oneshot(msg_req(Some(&tok_a), "pm", "webdev", "task 3")).await.unwrap();
+        let list3 = app.clone().oneshot(list_req(Some(&tok_a), "webdev")).await.unwrap();
+        let msgs3: Vec<Message> = serde_json::from_slice(&body_bytes(list3).await).unwrap();
+        assert_eq!(msgs3.len(), 1);
+        assert_eq!(msgs3[0].content, "task 3");
     }
 
     #[tokio::test]
